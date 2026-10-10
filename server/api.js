@@ -2,7 +2,16 @@ import fs from 'node:fs';
 import { openRepo, repoId } from './core/repo.js';
 import { GitError } from './core/git.js';
 import { overview, branches, commits, activity, health } from './core/analyzer.js';
-import { preflight, switchBranch, undoLast } from './core/safety.js';
+import {
+  preflight,
+  switchBranch,
+  undoLast,
+  createBranch,
+  deleteBranch,
+  branchRemovalPrecheck,
+  branchRemovalCandidates,
+  restoreBranch,
+} from './core/safety.js';
 import { listRepos, findRepo, upsertRepo, removeRepo, listLogs, addLog, getLastRepoId, setLastRepoId, resolveStartupRepo } from './core/store.js';
 import { pickFolder, pickFile, readTextFile, dialogSupported } from './core/dialog.js';
 import { listDrives, startScan, getScan, cancelScan, publicJob, probeFolder } from './core/scanner.js';
@@ -193,7 +202,31 @@ export async function handleApi(req, res, url) {
     }
 
     if (method === 'GET' && resource === 'overview') return send(res, 200, await overview(repo));
-    if (method === 'GET' && resource === 'branches') return send(res, 200, await branches(repo));
+
+    /* ---------- 分支的增删与恢复 ----------
+     * 顺序要紧：`branches/removal`、`branches/deleted` 必须在 `branches` 之前判掉，
+     * 否则会被下面的泛化分支路由抢先匹配（前者是 `branches` 的更长路径）。
+     */
+    if (method === 'GET' && resource === 'branches' && seg[3] === 'removal') {
+      return send(res, 200, await branchRemovalPrecheck(repo, q.get('name')));
+    }
+    if (method === 'GET' && resource === 'branches' && seg[3] === 'deleted') {
+      return send(res, 200, await branchRemovalCandidates(repo));
+    }
+    if (method === 'GET' && resource === 'branches' && seg.length === 3) return send(res, 200, await branches(repo));
+
+    if (method === 'POST' && resource === 'branches' && seg.length === 3) {
+      const body = await readBody(req);
+      return send(res, 200, await createBranch(repo, body));
+    }
+    if (method === 'POST' && resource === 'branches' && seg[3] === 'delete') {
+      const body = await readBody(req);
+      return send(res, 200, await deleteBranch(repo, body));
+    }
+    if (method === 'POST' && resource === 'branches' && seg[3] === 'restore') {
+      const body = await readBody(req);
+      return send(res, 200, await restoreBranch(repo, body));
+    }
     if (method === 'GET' && resource === 'commits') return send(res, 200, { commits: await commits(repo, Number(q.get('limit')) || 40) });
     if (method === 'GET' && resource === 'activity') return send(res, 200, await activity(repo, Number(q.get('weeks')) || 12));
     if (method === 'GET' && resource === 'health') return send(res, 200, await health(repo));
@@ -507,6 +540,7 @@ export function errorPayload(err) {
       detail: err.detail || undefined,
       stderr: err.stderr || undefined,
       preflight: err.preflight || undefined,
+      precheck: err.precheck || undefined,
       snapshotRef: err.snapshotRef || undefined,
       leftover: err.leftover || undefined,
     },

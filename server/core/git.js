@@ -24,7 +24,7 @@ const ALLOWED = new Set([
   'symbolic-ref',
   'worktree',
   'diff',
-  'update-ref',
+  'update-ref', // 收窄：只允许操作 refs/gm/**，见 assertSafeUpdateRef
   'show-ref',
   'config',
   'merge-base',
@@ -160,6 +160,115 @@ function assertSafePush(args) {
   }
 }
 
+/* ---------------------------------------------------------------- 分支 */
+
+/**
+ * 分支名的唯一校验入口。
+ *
+ * 刻意**不**去调 `git check-ref-format` 来判定：那要给引擎再开一个子命令白名单，
+ * 而且名字以 `-` 开头时它自己也会被当成选项解析，反而更绕。
+ * 用字符集 + 结构规则把 git 的 ref 约束表达清楚，足够且可测。
+ *
+ * 规则来源：git-check-ref-format(1)。这里把「能表达的」都表达了 ——
+ * 字符集排除空格与 ~ ^ : ? * [ \ 及控制字符；再单独挡掉前导 `-`/`.`、结尾 `.`/`.lock`、
+ * 以及 `..` `//` `@{` 这些 git 明确禁止的组合。
+ */
+const BRANCH_NAME_RE = /^[A-Za-z0-9._/@-]{1,200}$/;
+
+export function assertBranchName(name, label = '分支名') {
+  const s = String(name ?? '');
+  if (!s) throw new GitError(`缺少${label}`);
+  if (!BRANCH_NAME_RE.test(s)) {
+    throw new GitError(`${label}只能包含字母、数字与 . _ / @ - ：${s}`);
+  }
+  if (s.startsWith('-') || s.startsWith('.') || s.startsWith('/')) {
+    throw new GitError(`${label}不能以 - . / 开头：${s}`);
+  }
+  if (s.endsWith('.') || s.endsWith('/') || s.endsWith('.lock')) {
+    throw new GitError(`${label}不能以 . / .lock 结尾：${s}`);
+  }
+  if (s.includes('..') || s.includes('//') || s.includes('@{') || s === '@') {
+    throw new GitError(`${label}不符合 git 的 ref 规则：${s}`);
+  }
+  return s;
+}
+
+/** 只读的列举形态：`git branch --format=… --merged` 这类，全部参数都得是这些 flag */
+const BRANCH_READONLY_FLAG =
+  /^(--merged|--no-merged|--all|--remotes|-a|-r|--verbose|-v|--list|--no-column|--column(=.+)?|--color(=.+)?|--sort=.+|--format=.+|--points-at=.+)$/;
+
+/**
+ * `branch` 是第五个「窄化」子命令。
+ *
+ * 它此前走通用 flag 黑名单，因此 `-d` / `-D` 被整条熔断 —— 结果就是**删分支这个能力
+ * 在引擎层压根不存在**，界面上自然也没有（用户反馈「不能在可视化页面添删分支」）。
+ * 这里改成固定形态白名单：能写出来的只有这几种，其余的连语法都凑不出来。
+ *
+ * | 形态 | 含义 | 等级 |
+ * |---|---|---|
+ * | `branch` | 列出本地分支 | 只读 |
+ * | `branch <只读flag…>` | 列举（analyzer 用的 `--format=… --merged`） | 只读 |
+ * | `branch <name> [<起点>]` | 新建分支 | L1 可回滚写 |
+ * | `branch -d <name>` | 删除已合并分支（git 自己会拒绝未合并的） | L2 |
+ * | `branch -D <name>` | 强制删除 | L2 |
+ *
+ * 注意 `-d` / `-D` 的区别是**交给 git 去挡**：`-d` 遇到未合并分支会失败，
+ * 这就是我们希望的第二道防线，不要自己实现合并判断去替代它。
+ */
+function assertSafeBranch(args) {
+  const rest = args.slice(1);
+
+  if (rest.length === 0) return; // git branch：列出本地分支
+
+  if (rest[0] === '-d' || rest[0] === '-D') {
+    if (rest.length !== 2) throw new GitError('branch 删除只接受 `git branch -d|-D <name>` 这一种形式');
+    assertBranchName(rest[1]);
+    return;
+  }
+
+  // 只读列举：必须全是只读 flag，不接受任何位置参数
+  if (rest.every((a) => typeof a === 'string' && a.startsWith('-') && BRANCH_READONLY_FLAG.test(a))) return;
+
+  // 新建：branch <name> [<起点>]
+  if (rest.length === 1) {
+    assertBranchName(rest[0]);
+    return;
+  }
+  if (rest.length === 2 && !rest[0].startsWith('-')) {
+    assertBranchName(rest[0]);
+    assertBranchName(rest[1], '起点');
+    return;
+  }
+
+  throw new GitError(`branch 参数不在白名单：${rest.join(' ')}`);
+}
+
+/* ------------------------------------------------------- update-ref */
+
+/**
+ * 我们自己维护的命名空间。`update-ref` 是引擎里唯一能「凭空造 / 删引用」的命令，
+ * 所以把它也收窄到 refs/gm/** 之内：
+ *
+ *   update-ref <refs/gm/…> <sha|HEAD>     建 / 移动引用
+ *   update-ref -d <refs/gm/…>             删除引用（收窄口子）
+ *
+ * 好处是 `update-ref -d refs/heads/main` 这种「用底层命令删掉用户分支」的写法
+ * **在语法层面就凑不出来** —— 与 push / branch 同一思路，比逐条枚举黑名单可靠。
+ * 顺带解决了删除分支失败后清理回滚点的需求（见 safety.js#deleteBranch）。
+ */
+const GM_REF = /^refs\/gm\/[A-Za-z0-9._@/-]{1,200}$/;
+
+function assertSafeUpdateRef(args) {
+  const rest = args.slice(1);
+  if (rest[0] === '-d') {
+    if (rest.length !== 2) throw new GitError('update-ref 删除只接受 `update-ref -d <refs/gm/…>`');
+    if (!GM_REF.test(rest[1])) throw new GitError(`update-ref 只能删除 refs/gm/ 下的引用，收到：${rest[1]}`);
+    return;
+  }
+  if (rest.length === 2 && GM_REF.test(rest[0]) && typeof rest[1] === 'string' && !rest[1].startsWith('-')) return;
+  throw new GitError(`update-ref 参数不在白名单（只允许操作 refs/gm/ 下的引用）：${rest.join(' ')}`);
+}
+
 export class GitError extends Error {
   constructor(message, extra = {}) {
     super(message);
@@ -176,10 +285,12 @@ export function assertSafe(args) {
   if (FORBIDDEN_SUBCMDS.has(sub)) throw new GitError(`git 子命令被熔断: ${sub}`);
   if (!ALLOWED.has(sub)) throw new GitError(`git 子命令不在白名单: ${sub}`);
 
-  // 三个窄化写操作：参数形态固定，单独校验后直接返回
+  // 窄化写操作：参数形态固定，单独校验后直接返回
   if (sub === 'push') return assertSafePush(args);
   if (sub === 'remote') return assertSafeRemote(args);
   if (sub === 'fetch') return assertSafeFetch(args);
+  if (sub === 'branch') return assertSafeBranch(args);
+  if (sub === 'update-ref') return assertSafeUpdateRef(args);
 
   for (let idx = 1; idx < args.length; idx++) {
     const a = args[idx];

@@ -9,8 +9,12 @@
 
 **方式一：桌面版（推荐，双击即用）**
 
-下载 `GitManager-0.2.1-setup.exe` 安装，或直接用免安装的 `GitManager-0.2.1-portable.exe`。
+下载 `GitManager-0.2.2-setup.exe` 安装，或直接用免安装的 `GitManager-0.2.2-portable.exe`。
 装好后双击启动，不需要命令行、不需要 `npm install`。
+
+> 当前 `dist-desktop/` 里已经打好的安装包是 **0.2.1**；0.2.2（分支增删 + 盘根扫描修复）需要重新跑一次 `npm run dist`。
+> 因为本机有「批量删除守卫」（一次删超 50 个文件会被拦下），electron-builder 清理旧 `win-unpacked` 会失败 ——
+> **一个输出目录只能用一次**，重新打包请先改 `build.directories.output` 或手动清空 `dist-desktop/`。
 
 > 桌面版会用到系统里的 `git`。如果没装，去 [git-scm.com](https://git-scm.com/download/win) 装一个即可。
 
@@ -43,7 +47,7 @@ vibe coding 的项目往往**能跑但难维护**：临时分支堆积、WIP 提
 | ---------- | --------------------------------------------------- |
 | **概览**     | 这个仓库现在健康吗？提交节奏如何？                                   |
 | **提交记录**   | AI 参与了哪些提交？（多信号推断，每条给依据）                            |
-| **分支与引用**  | 哪些分支该清理？能安全地切过去吗？                                   |
+| **分支与引用**  | 哪些分支该清理？能安全地切过去、新建一个、或者删掉吗？                          |
 | **操作日志**   | 我（或 AI）对它做过什么？能撤销吗？                                 |
 | **GitHub** | 远端有哪些仓库？能不改文件就读到内容吗？**能把本地仓库提交并推上去吗？** 能安全地改一行并提交吗？ |
 
@@ -65,6 +69,7 @@ vibe coding 的项目往往**能跑但难维护**：临时分支堆积、WIP 提
 - **AI 协作痕迹**（多信号推断，可解释、纯本地、不读文件内容）
 - 半成品提交（WIP）占比
 - 分支风险徽章：当前 / 领先 N / 落后 N / 未合并 / stale N 天 / 被工作树占用
+- **分支的增删与恢复**：界面直接新建分支、删除分支（正检出/唯一分支/被工作树占用会被拦下），删除前会展示影响范围；删掉的尖端存进 `refs/gm/deleted/*`，可在「可恢复的删除点」里一键找回
 
 #### AI 协作痕迹怎么判的
 
@@ -93,6 +98,7 @@ vibe coding 的项目往往**能跑但难维护**：临时分支堆积、WIP 提
 - 切换前强制 Preflight 检查
 - 工作区脏时自动快照，切换后工作区干净
 - 一键撤销，改动完整恢复
+- **新建分支 / 删除分支 / 恢复已删除的分支**（删除前展示影响范围，删掉的尖端进 `refs/gm/deleted/*` 回收站）
 - 全部操作进日志
 
 ### 四、GitHub 集成（Web 版新增）
@@ -207,7 +213,23 @@ vibe coding 的项目往往**能跑但难维护**：临时分支堆积、WIP 提
 - 未提交内容一律进快照，**永不静默丢弃**（所以 UI 上根本没有「放弃改动」这个选项）
 - 快照存于 `refs/gm/snapshots/*`，不污染你的 `git stash list`
 
-### 本地提交并推送（新增，唯一会改本地提交历史的路径）
+### 分支的新建与删除
+
+新建分支是 **L1**（只是多一个指针，不覆盖任何文件）；删除是 **L2**。
+
+```bash
+# 新建：branch <name> [<起点>]
+# 删除：branch -d <name>（git 自己会拒绝未合并分支） 或 branch -D <name>（强制）
+# 删前把尖端存进 refs/gm/deleted/<name>-<ts> —— 这就是回收站
+```
+
+- **`-d` 与 `-D` 的区别交给 git 自己挡**，我们**不自己实现合并判断**去替代它（自己算会与 git 的 upstream 语义不一致而误拦）。所以「有未合并提交」不是阻塞项，只是一条要提醒你的事实
+- **强制删除必须把分支名原样再输一遍**（`confirm === name`），而且这个校验**发生在任何 git 调用之前** —— 确认错了，仓库一个字节都不会动
+- 删除失败（比如 `-d` 被 git 拒绝）时会**清掉刚建的回滚点**，避免候选列表里留下一个「名字还在的幽灵删除点」
+- 恢复分支 = `git branch <name> <refs/gm/deleted/…>`，不改变任何文件
+- 正检出的分支、仓库里唯一的本地分支、被其它工作树占用的分支，**都删不掉**（git 本身也不允许，我们提前讲清楚）
+
+### 本地提交并推送（唯一会改本地提交历史的路径）
 
 ```
 状态检查 → 选目标 → 输入仓库名二次确认 → 打快照 refs/gm/prepush/* → add → commit → remote → push → 记审计日志
@@ -220,6 +242,8 @@ vibe coding 的项目往往**能跑但难维护**：临时分支堆积、WIP 提
 | `push`   | `git push [-u\|--set-upstream] origin <单一分支名>`                                           | `--force` / `-f` / `+refspec` / `--mirror` / `--all` / `--tags` / `--delete` / `--prune` / 通配 refspec —— 因为 refspec 只允许单个分支名，这些形态**根本无法表达** |
 | `remote` | `remote`（列表）/ `remote -v` / `remote get-url origin` / `remote add\|set-url origin <url>` | `remote remove` / `rename` / 操作 origin 以外的远端名                                                                                               |
 | `fetch`  | `git fetch origin [branch]`                                                              | 非 origin、多余参数                                                                                                                               |
+| `branch` | `branch` / `branch <只读flag…>` / `branch <name> [<起点>]` / `branch -d\|-D <name>`            | `-m`（改名）/ `-f` / `--force` 拼接                                                                                                                |
+| `update-ref` | `update-ref <refs/gm/…> <sha\|HEAD>` / `update-ref -d <refs/gm/…>`                     | 越出 `refs/gm/**` 一律拒绝 —— `update-ref -d refs/heads/main` 这种「用底层命令删掉用户分支」的写法**根本写不出来**                                                      |
 
 - 远端地址必须是 `https://github.com/owner/name(.git)`；`..` 在**原始字符串**上校验（URL 解析器会先把它归一化掉，事后查 `pathname` 查不到），`http` / ssh / 非 github 主机一律拒绝
 - `git gc` / `clean` / `reset` / `checkout` / `rebase` / `merge` **仍然整条熔断**
@@ -320,6 +344,11 @@ dist-desktop/              打包产物（gitignore，npm run dist 生成）
 | DELETE | `/api/repos/:id`                 | 从列表移除（不动磁盘）                                                                     |
 | GET    | `/api/repos/:id/overview`        | 总览                                                                              |
 | GET    | `/api/repos/:id/branches`        | 分支列表（含风险）                                                                       |
+| GET    | `/api/repos/:id/branches/removal?name=` | **删除前评估**：阻塞项、未合并提交数、尖端、远端同名分支                                                  |
+| GET    | `/api/repos/:id/branches/deleted` | 可恢复的删除点（`refs/gm/deleted/*`）                                                    |
+| POST   | `/api/repos/:id/branches`        | 新建分支 `{ name, from? }`                                                          |
+| POST   | `/api/repos/:id/branches/delete`  | 删除分支 `{ name, force?, confirm? }`（`force=true` 时 `confirm` 必须是分支名本身）             |
+| POST   | `/api/repos/:id/branches/restore` | 恢复已删除的分支 `{ name, ref }`                                                       |
 | GET    | `/api/repos/:id/commits?limit=`  | 提交记录                                                                            |
 | GET    | `/api/repos/:id/activity?weeks=` | 热力图数据                                                                           |
 | GET    | `/api/repos/:id/health`          | 健康度报告                                                                           |
@@ -387,9 +416,9 @@ dist-desktop/              打包产物（gitignore，npm run dist 生成）
 | 不碰系统区域  | 默认跳过 `Windows`、`Program Files`、`AppData`、`$RECYCLE.BIN` 等，以及 `node_modules` 等重量级缓存目录 |
 | 可验证     | 已实测：扫描前后被扫目录的**文件大小、修改时间、目录结构完全一致**，未新增任何文件                                          |
 
-> 会改动仓库的路径只有三条：**本地分支切换**、**本地提交并推送**、**GitHub 远端提交**。  
-> 三者都要经过「预演/检查 → 快照/乐观锁 → 二次确认 → 审计日志」这一整套闸门。  
-> 前者必须经过 Preflight + 快照 + 日志，后者必须经过预演 + 确认 + 乐观锁 + 审计日志。
+> 会改动仓库的路径只有四条：**本地分支切换**、**本地分支的新建/删除/恢复**、**本地提交并推送**、**GitHub 远端提交**。  
+> 四者都要经过「预演/检查 → 快照/回收点/乐观锁 → 二次确认 → 审计日志」这一整套闸门。
+> 前两条必须经过 Preflight + 快照（或 `refs/gm/deleted` 回收点）+ 日志；后两条必须经过预演 + 确认 + 乐观锁 + 审计日志。
 
 ---
 
@@ -399,6 +428,7 @@ dist-desktop/              打包产物（gitignore，npm run dist 生成）
 node scripts/check-oauth.mjs         # 设备码流程状态机（含失败分支）
 node scripts/check-gh-poll.mjs       # 授权面板的轮询循环（DOM 桩 + 手动定时器驱动）
 node scripts/check-github-guard.mjs  # 写操作守卫 + 路径穿越 + clone 危险 flag
+node scripts/check-branch.mjs        # 分支增删：窄化白名单 + 盘根路径边界 + 真实建/删/恢复 + HTTP 路由 + 前端契约
 node scripts/check-publish.mjs       # 提交并推送：push/remote 窄化熔断 + 守卫 + 真实 push 端到端
 node scripts/check-clone-e2e.mjs     # 真实克隆端到端（需网络）
 node scripts/check-ai-signals.mjs    # AI 协作痕迹检测器（显式/形态/过程证据 + 诚实边界）

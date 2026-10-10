@@ -49,11 +49,22 @@ function normCase(p) {
   return process.platform === 'win32' ? p.toLowerCase() : p;
 }
 
-/** 路径包含性校验：child 必须严格位于 root 之内 */
+/**
+ * 路径包含性校验：child 必须严格位于 root 之内。
+ *
+ * ★ 这里踩过一个坑：不能写成 `path.resolve(root) + path.sep`。
+ *   当 root 是**盘根**（`E:\`）时，`path.resolve` 返回的字符串**已经自带结尾分隔符**，
+ *   再拼一次 sep 就变成 `E:\\`（两个反斜杠），于是任何子路径都不可能 startsWith 它
+ *   —— 结果就是「用盘根扫描，一个仓库都找不到」，但指定具体目录却正常。
+ *   正确做法是两边都先规整成「不带重复结尾分隔符」的形态再比较。
+ */
+function withTrailingSep(p) {
+  const abs = path.resolve(p);
+  return normCase(abs.endsWith(path.sep) ? abs : abs + path.sep);
+}
+
 function isInside(root, child) {
-  const r = normCase(path.resolve(root)) + path.sep;
-  const c = normCase(path.resolve(child)) + path.sep;
-  return c.startsWith(r);
+  return withTrailingSep(child).startsWith(withTrailingSep(root));
 }
 
 /** 探测某个目录本身是不是 git 仓库（只 lstat 一次，不解引用符号链接） */
@@ -310,3 +321,5 @@ export async function probeFolder(input) {
 }
 
 export { detectRepo };
+/** 导出供测试直接覆盖「盘根」这类边界（真实扫盘根太慢，不适合放进自动化测试） */
+export { isInside as pathIsInside, withTrailingSep };

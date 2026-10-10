@@ -43,9 +43,10 @@ function serveStatic(req, res, url) {
 
   let rel = decodeURIComponent(url.pathname);
   if (rel === '/' || rel === '') rel = '/index.html';
-  const target = path.join(WEB_DIR, rel);
-  // 防目录穿越
-  if (!target.startsWith(WEB_DIR)) {
+  const target = path.resolve(WEB_DIR, '.' + rel);
+  // 防目录穿越：必须以「WEB_DIR + 分隔符」为前缀，而不是裸的 WEB_DIR 前缀。
+  // 裸前缀会让同级的 webXXX 目录也通过（`/web2/secret` 就落在 `web` 的字符串前缀里）。
+  if (!target.startsWith(WEB_DIR + path.sep)) {
     res.writeHead(403).end('Forbidden');
     return true;
   }

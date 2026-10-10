@@ -68,6 +68,15 @@ export const api = {
   switchBranch: (id, payload) => request(`/repos/${enc(id)}/switch`, { method: 'POST', body: payload }),
   undo: (id) => request(`/repos/${enc(id)}/undo`, { method: 'POST' }),
 
+  // 分支的增删与恢复
+  // 删除前先取只读评估（有哪些阻塞项、是否会被 git 拒绝），让用户看着事实做决定
+  branchRemoval: (id, name) => request(`/repos/${enc(id)}/branches/removal?${qs({ name })}`),
+  branchesDeleted: (id) => request(`/repos/${enc(id)}/branches/deleted`),
+  createBranch: (id, payload) => request(`/repos/${enc(id)}/branches`, { method: 'POST', body: payload }),
+  // force=true 时必须把分支名原样放进 confirm —— 服务端会校验，且校验先于任何 git 调用
+  deleteBranch: (id, payload) => request(`/repos/${enc(id)}/branches/delete`, { method: 'POST', body: payload }),
+  restoreBranch: (id, payload) => request(`/repos/${enc(id)}/branches/restore`, { method: 'POST', body: payload }),
+
   // 本地仓库 → GitHub 的提交与推送
   publishStatus: (id) => request(`/repos/${enc(id)}/publish-status`),
   publish: (id, payload) => request(`/repos/${enc(id)}/publish`, { method: 'POST', body: payload }),

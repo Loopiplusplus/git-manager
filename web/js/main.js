@@ -12,6 +12,8 @@ import {
   openGithubRepo,
   openCloneWizard,
   openPublishWizard,
+  openCreateBranch,
+  openDeleteBranch,
 } from './palette.js';
 
 const NAV = [
@@ -105,12 +107,15 @@ async function render() {
       setHeader(o);
       view.innerHTML = renderOverview({ overview: o, health: h, activity: a, commits: cm });
     } else if (state.view === 'branches') {
-      const br = await api.branches(repo.id);
-      if (mine !== seq) return;
-      const o = await api.overview(repo.id);
+      // 删除点列表是锦上添花，拿不到也不该让整页报错
+      const [br, o, del] = await Promise.all([
+        api.branches(repo.id),
+        api.overview(repo.id),
+        api.branchesDeleted(repo.id).catch(() => null),
+      ]);
       if (mine !== seq) return;
       setHeader(o);
-      view.innerHTML = renderBranches({ branches: br });
+      view.innerHTML = renderBranches({ branches: br, deleted: del });
     } else if (state.view === 'commits') {
       const cm = await api.commits(repo.id, 60);
       if (mine !== seq) return;
@@ -324,6 +329,18 @@ document.addEventListener('click', async (e) => {
     }
   } else if (action === 'switch') {
     openSwitchFlow(ctx, t.dataset.branch);
+  } else if (action === 'branch-new') {
+    openCreateBranch(ctx);
+  } else if (action === 'branch-delete') {
+    openDeleteBranch(ctx, t.dataset.branch);
+  } else if (action === 'branch-restore') {
+    try {
+      const r = await api.restoreBranch(state.repo.id, { name: t.dataset.branch, ref: t.dataset.ref });
+      await ctx.refresh();
+      toast(`已恢复分支 ${r.name}`, 'ok');
+    } catch (err) {
+      toast(err.message, 'err');
+    }
   } else if (action === 'gh-save-client-id') {
     const v = $('#gh-client-id')?.value.trim();
     if (!v) { toast('请先填写 Client ID', 'err'); return; }

@@ -310,6 +310,218 @@ function renderResult(ctx, res, pf) {
 }
 
 /* ============================================================
+   分支的增与删
+   ============================================================ */
+
+/**
+ * 新建分支。
+ *
+ * 只是多一个指针，不覆盖任何文件，所以不需要 preflight —— 但仍要把
+ * 「从哪个提交开始」讲清楚，否则用户以为切过去了却没切。
+ */
+export async function openCreateBranch(ctx) {
+  const repo = ctx.state.repo;
+  if (!repo) { toast('请先接入一个仓库'); return; }
+
+  // 拉一次分支列表用于「起点」下拉，省得用户手打起点名（打错就直接报错了）
+  let br = null;
+  try {
+    br = await api.branches(repo.id);
+  } catch {
+    /* 拿不到列表不阻塞创建，起点留空即用当前 HEAD */
+  }
+
+  const options =
+    '<option value="" selected>（当前 HEAD）</option>' +
+    (br?.local || [])
+      .map((b) => `<option value="${esc(b.name)}">${esc(b.name)}${b.isCurrent ? '（当前）' : ''}</option>`)
+      .join('');
+
+  mount(`<div class="modal">
+    <div class="modal-head">
+      <h3 class="modal-title">新建分支</h3>
+      <p class="modal-sub">在新分支上继续干活，当前分支不受影响</p>
+    </div>
+    <div class="modal-body">
+      <p class="section-title" style="margin:0 0 6px">分支名</p>
+      <input class="input" id="br-name" placeholder="例如 feature/ai-signals" autocomplete="off" spellcheck="false">
+      <div class="tiny muted" style="margin-top:6px">只能用字母、数字与 <span class="mono">. _ / @ -</span>；不能以 <span class="mono">- . /</span> 开头，不能含空格与 <span class="mono">~ ^ : ? * [ \\</span>。</div>
+
+      <p class="section-title" style="margin:18px 0 6px">起点</p>
+      <select class="input" id="br-from">${options}</select>
+      <div class="tiny muted" style="margin-top:6px">新分支将从这里指向的提交开始。</div>
+
+      <div class="note" style="margin-top:14px">新建分支只是多一个指针，<b>不会改任何文件</b>，也不会动你当前的工作区。随时可以用「删除分支」撤销。</div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn" data-act="cancel">取消</button>
+      <button class="btn btn-primary" data-act="go">创建分支</button>
+    </div>
+  </div>`);
+
+  const o = $('#overlay');
+  const nameEl = o.querySelector('#br-name');
+  const fromEl = o.querySelector('#br-from');
+  const goBtn = o.querySelector('[data-act="go"]');
+  o.querySelector('[data-act="cancel"]').addEventListener('click', closeOverlay);
+  dispose = escClose(closeOverlay);
+  setTimeout(() => nameEl.focus(), 30);
+
+  const submit = async () => {
+    const name = nameEl.value.trim();
+    if (!name) {
+      toast('请填写分支名', 'err');
+      nameEl.focus();
+      return;
+    }
+    goBtn.disabled = true;
+    goBtn.innerHTML = '<span class="spinner"></span> 创建中';
+    try {
+      const r = await api.createBranch(repo.id, { name, from: fromEl.value || undefined });
+      closeOverlay();
+      await ctx.refresh();
+      toast(`已创建分支 ${r.name}`, 'ok');
+    } catch (e) {
+      goBtn.disabled = false;
+      goBtn.textContent = '创建分支';
+      toast(e.message, 'err');
+    }
+  };
+
+  goBtn.addEventListener('click', submit);
+  nameEl.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') submit();
+  });
+}
+
+/**
+ * 删除分支 —— 先做只读评估，把事实摆出来，再让用户决定。
+ * 不给「确定吗？」这种把判断权推回给用户的做法。
+ */
+export async function openDeleteBranch(ctx, name) {
+  const repo = ctx.state.repo;
+  if (!repo) return;
+
+  mount(`<div class="modal">
+    <div class="modal-head">
+      <h3 class="modal-title">删除分支 · ${esc(name)}</h3>
+      <p class="modal-sub">正在评估影响…</p>
+    </div>
+    <div class="modal-body"><div class="loading"><span class="spinner"></span><span>检查中</span></div></div>
+  </div>`);
+  dispose = escClose(closeOverlay);
+
+  let pre;
+  try {
+    pre = await api.branchRemoval(repo.id, name);
+  } catch (e) {
+    mount(`<div class="modal">
+      <div class="modal-head"><h3 class="modal-title">检查失败</h3></div>
+      <div class="modal-body"><div class="note note-err">${esc(e.message)}</div></div>
+      <div class="modal-foot"><button class="btn" data-act="cancel">关闭</button></div>
+    </div>`);
+    $('#overlay').querySelector('[data-act="cancel"]').addEventListener('click', closeOverlay);
+    dispose = escClose(closeOverlay);
+    return;
+  }
+
+  renderDeletePrecheck(ctx, pre);
+}
+
+function renderDeletePrecheck(ctx, pre) {
+  const blocked = !pre.ok;
+  const unmerged = Number(pre.unmerged) || 0;
+  const needsForce = !!pre.needsForce;
+
+  const blockers = blocked
+    ? `<div class="note note-err" style="margin-bottom:12px">无法删除：<br>${pre.blockers.map((b) => '· ' + esc(b.label)).join('<br>')}</div>`
+    : '';
+
+  const facts = [
+    ['分支', pre.name],
+    ['尖端提交', pre.sha ? `${pre.sha} · ${pre.subject || '(无提交信息)'}` : '—'],
+    ['最后提交时间', pre.date ? fmtDay(pre.date) : '—'],
+    ['仓库本地分支数', String(pre.branchCount)],
+    ['远端同名分支', pre.remoteSameName ? '有（删除的只是本地副本）' : '没有'],
+  ];
+
+  // 「有未合并提交」不是阻塞项 —— git 的 -d 会拒绝它，这是第二道防线。
+  // 我们要做的只是把这件事讲明白，并把强制删除这条路指出来。
+  const mergedNote =
+    unmerged > 0
+      ? `<div class="note note-err" style="margin-top:12px">
+           这个分支有 <b>${unmerged}</b> 个提交没有合并进当前分支，普通删除会被 git 拒绝。<br>
+           仍要删除的话需要「强制删除」—— 删除前的尖端会先存入回滚点，随时可以恢复。
+         </div>`
+      : `<div class="note note-ok" style="margin-top:12px">这个分支的提交都已合并进当前分支，删除不会丢任何提交。</div>`;
+
+  const confirmBox = needsForce
+    ? `<div style="margin-top:14px">
+        <p class="section-title" style="margin:0 0 6px">二次确认</p>
+        <p class="tiny muted" style="margin:0 0 8px">请把分支名 <span class="mono">${esc(pre.name)}</span> 原样输入，才能强制删除。</p>
+        <input class="input" id="confirm-name" placeholder="${esc(pre.name)}" autocomplete="off" spellcheck="false">
+      </div>`
+    : '';
+
+  mount(`<div class="modal">
+    <div class="modal-head">
+      <h3 class="modal-title">删除分支 · ${esc(pre.name)}</h3>
+      <p class="modal-sub">删除前会先把分支尖端存入 <span class="mono">refs/gm/deleted/*</span> 作为回滚点</p>
+    </div>
+    <div class="modal-body">
+      ${blockers}
+      <p class="section-title" style="margin:0 0 6px">影响范围</p>
+      ${facts
+        .map(
+          ([k, v]) =>
+            `<div class="list-row" style="padding:7px 0"><span class="tiny muted" style="flex:0 0 110px">${esc(k)}</span><span class="tiny mono" style="flex:1;min-width:0">${esc(v)}</span></div>`,
+        )
+        .join('')}
+      ${mergedNote}
+      ${confirmBox}
+      ${blocked ? '' : `<div class="note" style="margin-top:14px">删除后如果后悔，可在「分支与引用」页的「可恢复的删除点」里一键恢复，不会丢任何提交。</div>`}
+    </div>
+    <div class="modal-foot">
+      <button class="btn" data-act="cancel">取消</button>
+      <button class="btn ${needsForce ? 'btn-danger' : 'btn-primary'}" data-act="go" ${blocked ? 'disabled' : ''}>${needsForce ? '强制删除' : '删除分支'}</button>
+    </div>
+  </div>`);
+
+  const o = $('#overlay');
+  const goBtn = o.querySelector('[data-act="go"]');
+  const confirmEl = o.querySelector('#confirm-name');
+  o.querySelector('[data-act="cancel"]').addEventListener('click', closeOverlay);
+  dispose = escClose(closeOverlay);
+  if (confirmEl) setTimeout(() => confirmEl.focus(), 30);
+
+  goBtn.addEventListener('click', async () => {
+    const confirm = confirmEl ? confirmEl.value.trim() : pre.name;
+    if (needsForce && confirm !== pre.name) {
+      toast('二次确认不匹配：请输入完整分支名', 'err');
+      return;
+    }
+    goBtn.disabled = true;
+    goBtn.innerHTML = '<span class="spinner"></span> 删除中';
+    try {
+      const r = await api.deleteBranch(ctx.state.repo.id, { name: pre.name, force: needsForce, confirm });
+      closeOverlay();
+      await ctx.refresh();
+      toast(`已删除分支 ${r.name}${r.forced ? '（强制）' : ''}，可随时恢复`, 'ok');
+    } catch (e) {
+      goBtn.disabled = false;
+      goBtn.textContent = needsForce ? '强制删除' : '删除分支';
+      // 普通删除被 git 以「未合并」拒绝 → 直接把用户引到强制删除那条路，而不是让他自己去猜
+      if (e.data?.code === 'NOT_MERGED') {
+        renderDeletePrecheck(ctx, { ...pre, needsForce: true });
+        toast('该分支有未合并的提交，请改用「强制删除」', 'err');
+        return;
+      }
+      toast(e.message, 'err');
+    }
+  });
+}
+
+/* ============================================================
    仓库管理
    ============================================================ */
 

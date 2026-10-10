@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { git, gitOk, GitError } from './git.js';
+import { git, gitOk, GitError, assertBranchName } from './git.js';
 import { addLog, listLogs, updateLog } from './store.js';
 import { gitDirHas } from './repo.js';
 import { parseStatus } from './analyzer.js';
@@ -7,6 +7,8 @@ import { lines } from './util.js';
 
 const SNAP_NS = 'refs/gm/snapshots';
 const SAFE_BRANCH = /^[A-Za-z0-9._\/@-]{1,240}$/;
+/** for-each-ref 的字段分隔符（与 analyzer.js 同一约定，够怪就不会撞上真实内容） */
+const SEP_F = '|~|';
 
 function stamp() {
   const d = new Date();
@@ -279,6 +281,346 @@ export async function undoLast(repo) {
   });
 
   return { ok: true, from: last.to, to: last.from, restoredSnapshot: restored, undoneLogId: last.id };
+}
+
+/* ============================================================================
+ *  分支的增与删
+ * ============================================================================
+ *
+ *  之前这两个能力**压根不存在** —— 引擎层的 `branch` 走通用 flag 黑名单，
+ *  `-d`/`-D` 被整条熔断，所以「新建分支」和「删除分支」在界面上无从做起。
+ *  现在按 push/remote 的同一思路，在引擎层开出固定形态的白名单（见 git.js#assertSafeBranch），
+ *  这里只负责编排与安全兜底。
+ *
+ *  删除的设计要点：**删之前先把分支尖端存进 refs/gm/deleted/**。
+ *  git 删分支只删指针，提交本身还在，但指针一没就找不到入口了 ——
+ *  存进自定义命名空间后，「恢复分支」就只是一次 `git branch <name> <ref>`。
+ *  这也是本项目一贯的做法：写操作必须可回滚，不能只靠「你确定吗」。
+ * ========================================================================== */
+
+const DELETED_NS = 'refs/gm/deleted';
+
+/** 分支名 → 可安全放进 ref 路径的片段（git ref 不允许 `..`，且分支名可能含 `/`） */
+function refSafeName(name) {
+  return String(name).replace(/\//g, '__').replace(/[^A-Za-z0-9._@-]/g, '_').slice(0, 120);
+}
+
+async function revCount(repoPath, spec) {
+  const r = await gitOk(repoPath, ['rev-list', '--count', ...spec]);
+  if (!r.ok) return null;
+  const n = Number(r.out.trim());
+  return Number.isFinite(n) ? n : null;
+}
+
+/**
+ * 删除分支前的**只读**评估。界面上先展示这些，再让用户决定 ——
+ * 而不是弹一个「确定吗？」就把决定权推给用户。
+ */
+export async function branchRemovalPrecheck(repo, name) {
+  const p = repo.path;
+  const target = assertBranchName(name);
+
+  const local = await gitOk(p, ['for-each-ref', '--format=%(refname:short)', 'refs/heads']);
+  const all = local.ok ? lines(local.out) : [];
+
+  const headSym = await gitOk(p, ['symbolic-ref', '--short', '-q', 'HEAD']);
+  const current = headSym.ok ? headSym.out.trim() : null;
+
+  const exists = all.includes(target);
+  const isCurrent = current === target;
+  const isOnly = all.length <= 1;
+
+  let sha = null;
+  let subject = null;
+  let date = null;
+  let upstream = '';
+  if (exists) {
+    const info = await gitOk(p, [
+      'for-each-ref',
+      `--format=%(objectname:short)${SEP_F}%(subject)${SEP_F}%(committerdate:iso-strict)${SEP_F}%(upstream:short)`,
+      `refs/heads/${target}`,
+    ]);
+    if (info.ok && info.out.trim()) {
+      [sha, subject, date, upstream] = info.out.trim().split(SEP_F);
+    }
+  }
+
+  // 相对当前分支有多少提交会失去入口（0 = 已合并，删了不丢东西）
+  const unmerged = exists && !isCurrent ? await revCount(p, [target, '--not', 'HEAD']) : 0;
+
+  // 远端是否有同名分支 —— 说明删掉的只是本地副本，不吓人；反之要提醒
+  const remoteSameName = (await gitOk(p, ['show-ref', '--verify', '--quiet', `refs/remotes/origin/${target}`])).ok;
+
+  // 是否已被某个工作树占用（占用时 git 会直接拒绝，提前告知比报错友好）
+  // ★ 必须排除「本仓库自己」的检出：`worktree list` 会把当前工作树也算进来，
+  //   不排除的话分支只要是被检出的那个就会被误判成 locked
+  //   （preflight / analyzer 都做了这个排除，这里最初漏了）。
+  const wt = await gitOk(p, ['worktree', 'list', '--porcelain']);
+  let lockedBy = null;
+  if (wt.ok) {
+    for (const block of wt.out.split('\n\n')) {
+      const w = block.match(/^worktree (.+)$/m);
+      const b = block.match(/^branch refs\/heads\/(.+)$/m);
+      if (!w || !b || b[1].trim() !== target) continue;
+      const wtPath = w[1].trim();
+      if (path.resolve(wtPath) !== path.resolve(p)) lockedBy = wtPath;
+    }
+  }
+
+  const blockers = [];
+  if (!exists) blockers.push({ id: 'not-found', label: '分支不存在' });
+  if (isCurrent) blockers.push({ id: 'is-current', label: `正检出于 ${target}，git 不允许删除当前分支（先切到别的分支）` });
+  if (isOnly) blockers.push({ id: 'is-only', label: '这是仓库里唯一的本地分支，删掉会让仓库失去 HEAD 指向' });
+  if (lockedBy) blockers.push({ id: 'locked', label: `被工作树占用：${lockedBy}` });
+
+  return {
+    name: target,
+    exists,
+    isCurrent,
+    isOnly,
+    isRepoEmpty: all.length === 0,
+    sha,
+    subject,
+    date,
+    upstream: upstream || '',
+    unmerged, // null 表示拿不到
+    remoteSameName,
+    lockedBy,
+    branchCount: all.length,
+    otherBranches: all.filter((b) => b !== target),
+    ok: blockers.length === 0,
+    blockers,
+    // -d 由 git 自己把关：未合并时它会拒绝。所以「有未合并提交」不是 blocker，只是一条要提醒的事实。
+    needsForce: unmerged === null ? true : unmerged > 0,
+  };
+}
+
+/**
+ * 新建分支。L1（可回滚写）：只是多一个指针，没有任何东西被覆盖。
+ */
+export async function createBranch(repo, { name, from } = {}) {
+  const p = repo.path;
+  const target = assertBranchName(name);
+  const start = from ? assertBranchName(from, '起点') : null;
+
+  const existing = await gitOk(p, ['show-ref', '--verify', '--quiet', `refs/heads/${target}`]);
+  if (existing.ok) {
+    const err = new Error(`分支 ${target} 已存在`);
+    err.status = 400;
+    throw err;
+  }
+
+  if (start) {
+    const fromOk = await gitOk(p, ['show-ref', '--verify', '--quiet', `refs/heads/${start}`]);
+    if (!fromOk.ok) {
+      const err = new Error(`起点分支不存在：${start}`);
+      err.status = 400;
+      throw err;
+    }
+  }
+
+  const args = start ? ['branch', target, start] : ['branch', target];
+  const r = await gitOk(p, args);
+  if (!r.ok) {
+    const err = new Error(`新建分支失败：${r.err?.stderr || '未知原因'}`);
+    err.status = 400;
+    throw err;
+  }
+
+  const head = await gitOk(p, ['rev-parse', '--short', target]);
+  const entry = addLog({
+    repoId: repo.id,
+    repoPath: p,
+    op: 'branch-create',
+    name: target,
+    from: start || (await currentBranch(p)),
+    sha: head.ok ? head.out.trim() : null,
+    result: 'ok',
+    rollbackHint: `git branch -d ${target}`,
+  });
+
+  return {
+    ok: true,
+    name: target,
+    from: entry.from,
+    sha: entry.sha,
+    logId: entry.id,
+    rollbackHint: entry.rollbackHint,
+  };
+}
+
+async function currentBranch(repoPath) {
+  const r = await gitOk(repoPath, ['symbolic-ref', '--short', '-q', 'HEAD']);
+  return r.ok ? r.out.trim() : null;
+}
+
+/**
+ * 删除分支。
+ *
+ * 两道门：
+ *   1. `-d`（非强制）—— 交给 git 拒绝未合并分支，这是第二道防线，别自己实现去替代它；
+ *   2. `-D`（强制）—— 必须 `confirm === name` 才放行，且**校验先于任何 git 调用**。
+ *      这条顺序很重要：确认串错了就不该已经动过仓库。
+ */
+export async function deleteBranch(repo, { name, force = false, confirm } = {}) {
+  const p = repo.path;
+  const target = assertBranchName(name);
+
+  // ★ 二次确认串校验放在最前面，早于快照与任何 git 写操作
+  if (force && String(confirm ?? '') !== target) {
+    const err = new Error(`强制删除需要二次确认：请原样输入分支名 ${target}`);
+    err.status = 400;
+    err.code = 'NO_CONFIRM';
+    throw err;
+  }
+
+  const pre = await branchRemovalPrecheck(repo, target);
+  if (!pre.ok) {
+    const err = new Error(`无法删除：${pre.blockers.map((b) => b.label).join('；')}`);
+    err.status = 400;
+    err.precheck = pre;
+    throw err;
+  }
+
+  // ★ 先把尖端存进自定义命名空间 —— 否则指针一删，提交就找不回来了
+  const ts = stamp();
+  const snapshotRef = `${DELETED_NS}/${refSafeName(target)}-${ts}`;
+  let refCreated = false;
+  if (pre.sha) {
+    const full = await gitOk(p, ['rev-parse', target]);
+    if (full.ok) {
+      const mk = await gitOk(p, ['update-ref', snapshotRef, full.out.trim()]);
+      if (!mk.ok) throw new Error(`无法为删除操作建立回滚点：${mk.err?.stderr || '未知原因'}`);
+      refCreated = true;
+    }
+  }
+
+  const flag = force ? '-D' : '-d';
+  const del = await gitOk(p, ['branch', flag, target]);
+  if (!del.ok) {
+    // 删除没成功 → 分支尖端没变，刚建的回滚点就是多余的。清掉它，
+    // 否则候选列表里会冒出一个「名字还在」的幽灵删除点。
+    // 这一步之所以安全，是因为 update-ref 被收窄到 refs/gm/** 之内（见 git.js）。
+    if (refCreated) await gitOk(p, ['update-ref', '-d', snapshotRef]);
+
+    const stderr = String(del.err?.stderr || '').trim();
+    const err = new Error(
+      force
+        ? `强制删除失败：${stderr || '未知原因'}`
+        : `删除被 git 拒绝：${stderr || '未知原因'}\n\n` +
+          `该分支有未合并的提交，git 不会用 -d 删除它。分支保持原样，没有任何改动。\n` +
+          `确认这些提交不再需要时，可以用「强制删除」—— 那时会先把分支尖端存入回滚点，随时可以恢复。`,
+    );
+    err.status = 400;
+    err.code = force ? 'FORCE_DELETE_FAILED' : 'NOT_MERGED';
+    throw err;
+  }
+
+  const entry = addLog({
+    repoId: repo.id,
+    repoPath: p,
+    op: 'branch-delete',
+    name: target,
+    sha: pre.sha,
+    unmerged: pre.unmerged,
+    forced: !!force,
+    snapshotRef,
+    result: 'ok',
+    rollbackHint: `git branch ${target} ${snapshotRef}`,
+    rollback: { kind: 'branch-restore', name: target, ref: snapshotRef },
+  });
+
+  return {
+    ok: true,
+    name: target,
+    sha: pre.sha,
+    unmerged: pre.unmerged,
+    forced: !!force,
+    snapshotRef,
+    logId: entry.id,
+    rollbackHint: entry.rollbackHint,
+    rollback: entry.rollback,
+  };
+}
+
+/** 列出可恢复的已删除分支（来自 refs/gm/deleted） */
+export async function listDeletedBranches(repo) {
+  const r = await gitOk(repo.path, [
+    'for-each-ref',
+    `--format=%(refname)${SEP_F}%(objectname:short)${SEP_F}%(subject)${SEP_F}%(committerdate:iso-strict)`,
+    DELETED_NS,
+  ]);
+  if (!r.ok) return [];
+
+  const local = await gitOk(repo.path, ['for-each-ref', '--format=%(refname:short)', 'refs/heads']);
+  const alive = new Set(local.ok ? lines(local.out) : []);
+
+  return lines(r.out)
+    .map((l) => {
+      const [ref, sha, subject, date] = l.split(SEP_F);
+      const tail = String(ref).slice(DELETED_NS.length + 1);
+      // 形如 <name>-<YYYYMMDDTHHMMSS>；名字里可能出现 `-`，所以从**最后一段**时间戳倒着切
+      const m = tail.match(/^(.*)-(\d{8}T\d{6})$/);
+      return {
+        ref,
+        name: m ? m[1].replace(/__/g, '/') : tail,
+        sha,
+        subject: subject || '',
+        date: date || null,
+        deletedAt: m ? m[2] : null,
+        // 同名分支又存在了 → 不必再恢复
+        restored: m ? alive.has(m[1].replace(/__/g, '/')) : false,
+      };
+    })
+    .sort((a, b) => String(b.date).localeCompare(String(a.date)));
+}
+
+/** 恢复一个被删除的分支：`git branch <name> <refs/gm/deleted/...>` */
+export async function restoreBranch(repo, { name, ref } = {}) {
+  const p = repo.path;
+  const target = assertBranchName(name);
+  const source = String(ref || '');
+  if (!source.startsWith(`${DELETED_NS}/`)) {
+    const err = new Error(`只能从 ${DELETED_NS}/ 下恢复，收到：${source}`);
+    err.status = 400;
+    throw err;
+  }
+
+  const still = await gitOk(p, ['show-ref', '--verify', '--quiet', `refs/heads/${target}`]);
+  if (still.ok) {
+    const err = new Error(`分支 ${target} 已存在，无需恢复`);
+    err.status = 400;
+    throw err;
+  }
+
+  const r = await gitOk(p, ['branch', target, source]);
+  if (!r.ok) {
+    const err = new Error(`恢复失败：${r.err?.stderr || '未知原因'}`);
+    err.status = 400;
+    throw err;
+  }
+
+  addLog({
+    repoId: repo.id,
+    repoPath: p,
+    op: 'branch-restore',
+    name: target,
+    from: source,
+    result: 'ok',
+    rollbackHint: `git branch -d ${target}`,
+  });
+
+  return { ok: true, name: target, ref: source };
+}
+
+/** 把 refs/gm/deleted 下的所有删除点列出来（含已被恢复的） */
+export async function branchRemovalCandidates(repo) {
+  const [deleted, branches] = await Promise.all([listDeletedBranches(repo), gitOk(repo.path, ['branch'])]);
+  return {
+    deleted,
+    recoverable: deleted.filter((d) => !d.restored),
+    localCount: branches.ok ? lines(branches.out).length : 0,
+  };
 }
 
 export { GitError };

@@ -305,13 +305,27 @@ export function renderPublishCard(o = {}) {
 
 /* ---------------- 分支 ---------------- */
 
-export function renderBranches({ branches: br, overview: o }) {
+export function renderBranches({ branches: br, deleted }) {
+  const onlyOne = br.local.length <= 1;
+
   const rows = br.local
     .map((b) => {
       const blocked = !!b.lockedBy || b.isCurrent;
-      const btn = b.isCurrent
+      const switchBtn = b.isCurrent
         ? '<span class="tiny muted" style="flex:0 0 auto">已检出</span>'
         : `<button class="btn btn-sm${blocked ? '' : ' btn-primary'}" data-action="switch" data-branch="${esc(b.name)}" ${blocked ? 'disabled title="' + esc(b.lockedBy ? '被工作树 ' + b.lockedBy + ' 占用' : '') + '"' : ''}>切换</button>`;
+
+      // 删除按钮：正检出的分支 git 不允许删；唯一分支删掉会让仓库失去 HEAD；被工作树占用的也拦下
+      const delReason = b.isCurrent
+        ? '不能删除正检出的分支，请先切换到别的分支'
+        : onlyOne
+          ? '这是仓库里唯一的本地分支，删掉会让仓库失去 HEAD 指向'
+          : b.lockedBy
+            ? `被工作树 ${b.lockedBy} 占用`
+            : '删除这个分支';
+      const canDelete = !b.isCurrent && !onlyOne && !b.lockedBy;
+      const delBtn = `<button class="btn btn-sm" data-action="branch-delete" data-branch="${esc(b.name)}" ${canDelete ? '' : 'disabled'} title="${esc(delReason)}">删除</button>`;
+
       return `<div class="list-row branch-row">
         <span class="branch-glyph">⑂</span>
         <div style="min-width:0;flex:1">
@@ -320,7 +334,8 @@ export function renderBranches({ branches: br, overview: o }) {
         </div>
         <div class="row" style="gap:8px;flex:0 0 auto">
           <div class="branch-badges" style="margin-left:0">${branchBadges(b)}</div>
-          ${btn}
+          ${delBtn}
+          ${switchBtn}
         </div>
       </div>`;
     })
@@ -328,6 +343,34 @@ export function renderBranches({ branches: br, overview: o }) {
 
   const stale = br.local.filter((b) => b.isStale).length;
   const unmerged = br.local.filter((b) => !b.isMerged && !b.isCurrent).length;
+
+  const recents = (deleted?.deleted || []).slice(0, 12);
+  const restoreSection = recents.length
+    ? `<div class="section">
+        <p class="section-title">可恢复的删除点 · ${recents.length}</p>
+        <div class="card" style="padding:6px 16px">
+          ${recents
+            .map(
+              (d) => `<div class="list-row">
+                <span class="branch-glyph">⤺</span>
+                <div style="min-width:0;flex:1">
+                  <div class="branch-name">${esc(d.name)} ${d.restored ? '<span class="badge b-gray">已恢复</span>' : ''}</div>
+                  <div class="branch-sub">${esc(d.sha)} · ${esc(d.subject || '(无提交信息)')}${d.deletedAt ? ` · 删除于 ${esc(fmtDay(deletedAtToIso(d.deletedAt)))}` : ''}</div>
+                </div>
+                ${
+                  d.restored
+                    ? ''
+                    : `<button class="btn btn-sm" data-action="branch-restore" data-branch="${esc(d.name)}" data-ref="${esc(d.ref)}">恢复</button>`
+                }
+              </div>`,
+            )
+            .join('')}
+        </div>
+        <p class="tiny muted" style="margin-top:10px">
+          删除分支时会把分支尖端存入 <span class="mono">refs/gm/deleted/*</span>，这里可以一键恢复。恢复只是重新指向那个提交，不改变任何文件。
+        </p>
+      </div>`
+    : '';
 
   return `
   <div class="section">
@@ -338,11 +381,17 @@ export function renderBranches({ branches: br, overview: o }) {
         ${br.dirtyCount ? `<span class="badge b-orange">${br.dirtyCount} 处未提交</span>` : '<span class="badge b-green">工作区干净</span>'}
         ${stale ? `<span class="badge b-gray">${stale} 个 stale</span>` : ''}
         ${unmerged ? `<span class="badge b-plain">${unmerged} 个未合并</span>` : ''}
+        <button class="btn btn-sm btn-primary" data-action="branch-new">新建分支</button>
       </div>
     </div>
     <div class="card" style="padding:6px">${rows || '<p class="muted tiny" style="padding:10px">没有本地分支</p>'}</div>
-    <p class="tiny muted" style="margin-top:10px">切换分支会先做安全检查；若工作区有未提交改动，会先自动快照再切换，可随时撤销。</p>
+    <p class="tiny muted" style="margin-top:10px">
+      切换分支会先做安全检查；若工作区有未提交改动，会先自动快照再切换，可随时撤销。
+      删除前会先把分支尖端存入 <span class="mono">refs/gm/deleted/*</span> 作为回滚点。
+    </p>
   </div>
+
+  ${restoreSection}
 
   ${
     br.remotes.length
@@ -357,6 +406,14 @@ export function renderBranches({ branches: br, overview: o }) {
         </div>`
       : ''
   }`;
+}
+
+/** `YYYYMMDDTHHMMSS`（本地时区）→ ISO 串，交给统一的 fmtDay 渲染 */
+function deletedAtToIso(s) {
+  const m = String(s).match(/^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})$/);
+  if (!m) return s;
+  const [, y, mo, d, h, mi, se] = m;
+  return `${y}-${mo}-${d}T${h}:${mi}:${se}`;
 }
 
 /* ---------------- 提交记录 ---------------- */
@@ -389,19 +446,44 @@ export function renderCommits({ commits: cm }) {
 
 /* ---------------- 操作日志 ---------------- */
 
+/** 写操作的展示文案：标签、徽章色、以及「分支变化」列要写什么 */
+const OP_META = {
+  switch: { label: '切换分支', badge: 'b-blue' },
+  undo: { label: '撤销切换', badge: 'b-plain' },
+  'branch-create': { label: '新建分支', badge: 'b-green' },
+  'branch-delete': { label: '删除分支', badge: 'b-orange' },
+  'branch-restore': { label: '恢复分支', badge: 'b-blue-soft' },
+};
+
+function opChange(l) {
+  if (l.op === 'branch-create') {
+    return `新建 <span class="mono">${esc(l.name || '')}</span>${l.from ? ` <span class="muted">←</span> ${esc(l.from)}` : ''}`;
+  }
+  if (l.op === 'branch-delete') {
+    const forced = l.forced ? ' <span class="badge b-orange">强制</span>' : '';
+    const un = l.unmerged ? ` <span class="tiny muted">（${l.unmerged} 个未合并提交）</span>` : '';
+    return `删除 <span class="mono">${esc(l.name || '')}</span>${forced}${un}`;
+  }
+  if (l.op === 'branch-restore') {
+    return `恢复 <span class="mono">${esc(l.name || '')}</span> <span class="muted">←</span> <span class="mono tiny muted">${esc(l.from || '')}</span>`;
+  }
+  return `${esc(l.from || '—')} <span class="muted">→</span> ${esc(l.to || '—')}`;
+}
+
 export function renderLog({ logs }) {
   const hasUndoable = logs.some((l) => l.op === 'switch' && !l.undone);
   const rows = logs
-    .map(
-      (l) => `<tr>
+    .map((l) => {
+      const meta = OP_META[l.op] || { label: l.op, badge: 'b-gray' };
+      return `<tr>
         <td class="mono tiny muted" style="white-space:nowrap">${esc(fmtDay(l.ts))}</td>
-        <td><span class="badge ${l.op === 'switch' ? 'b-blue' : l.op === 'undo' ? 'b-plain' : 'b-gray'}">${esc(l.op === 'switch' ? '切换分支' : l.op === 'undo' ? '撤销' : l.op)}</span></td>
-        <td class="mono tiny">${esc(l.from || '—')} <span class="muted">→</span> ${esc(l.to || '—')}</td>
+        <td><span class="badge ${meta.badge}">${esc(meta.label)}</span></td>
+        <td class="mono tiny">${opChange(l)}</td>
         <td class="tiny muted">${esc(l.strategy || '')}</td>
         <td class="tiny ${l.result === 'ok' ? 'muted' : ''}">${l.undone ? '<span class="badge b-gray">已撤销</span>' : esc(l.result === 'ok' ? '成功' : l.result || '')}</td>
         <td>${l.snapshotRef ? `<span class="badge b-orange" title="${esc(l.rollbackHint || '')}">有快照</span>` : ''}</td>
-      </tr>`,
-    )
+      </tr>`;
+    })
     .join('');
 
   return `<div class="section">
@@ -413,10 +495,10 @@ export function renderLog({ logs }) {
       ${
         logs.length
           ? `<table class="table"><thead><tr><th>时间</th><th>操作</th><th>分支变化</th><th>策略</th><th>结果</th><th></th></tr></thead><tbody>${rows}</tbody></table>`
-          : '<p class="muted tiny">还没有任何写操作。系统默认只读，只有你主动切换分支时才会计入这里。</p>'
+          : '<p class="muted tiny">还没有任何写操作。系统默认只读，只有你主动切换、新建或删除分支时才会计入这里。</p>'
       }
     </div>
-    <p class="tiny muted" style="margin-top:10px">所有写操作都会记录在此，并且可以一键撤销。快照存放在 <span class="mono">refs/gm/snapshots/*</span>，不会污染你的 stash 列表。</p>
+    <p class="tiny muted" style="margin-top:10px">所有写操作都会记录在此。切换快照存放在 <span class="mono">refs/gm/snapshots/*</span>，删除分支的回滚点存放在 <span class="mono">refs/gm/deleted/*</span>，都不会污染你的 stash 列表。</p>
   </div>`;
 }
 
