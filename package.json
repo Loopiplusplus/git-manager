@@ -1,6 +1,6 @@
 {
   "name": "git-manager",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "description": "本地 Git 仓库可视化体检与维护中枢（vibe coding 专用）。零依赖 Node 服务 + 纯静态前端，可直接迁移到 Tauri / Electron。",

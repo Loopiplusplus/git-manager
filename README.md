@@ -309,7 +309,7 @@ node scripts/check-oauth.mjs         # 设备码流程状态机（含失败分�
 node scripts/check-github-guard.mjs  # 写操作守卫 + 路径穿越 + clone 危险 flag
 node scripts/check-clone-e2e.mjs     # 真实克隆端到端（需网络）
 node scripts/check-ui.mjs            # 前端模块加载与渲染函数
-node scripts/check-dpapi.mjs         # DPAPI 加解密往返（含中文）
+node scripts/check-dpapi.mjs         # 凭据仓库端到端：DPAPI 加密 / 跨进程冷启动解密 / 空值边界
 node scripts/check-net.mjs           # 网络自检判据
 node scripts/check-scan.mjs          # 扫描器只读性
 node scripts/check-dialog.mjs        # 原生对话框桥

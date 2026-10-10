@@ -1,4 +1,23 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
 export const DAY = 86400000;
+
+/**
+ * 版本号单一来源：优先读根 package.json，读不到时回落到常量。
+ * 桌面端打包后目录布局可能变化，所以必须容错，不能在加载期抛错。
+ */
+export const VERSION = (() => {
+  try {
+    const here = path.dirname(fileURLToPath(import.meta.url));
+    const pkg = JSON.parse(fs.readFileSync(path.resolve(here, '../../package.json'), 'utf8'));
+    if (pkg && typeof pkg.version === 'string' && pkg.version) return pkg.version;
+  } catch {
+    /* 打包后端忽略 */
+  }
+  return '0.2.0';
+})();
 
 export function nowIso() {
   return new Date().toISOString();

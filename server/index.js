@@ -5,6 +5,7 @@ import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { handleApi, errorPayload } from './api.js';
 import { gitVersion } from './core/git.js';
+import { VERSION } from './core/util.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -31,7 +32,7 @@ const MIME = {
 
 function serveStatic(req, res, url) {
   if (url.pathname === '/gm-config.js') {
-    const js = `window.__GM__ = ${JSON.stringify({ token: TOKEN, apiBase: '/api', version: '0.1.0' })};`;
+    const js = `window.__GM__ = ${JSON.stringify({ token: TOKEN, apiBase: '/api', version: VERSION })};`;
     res.writeHead(200, { 'content-type': MIME['.js'], 'cache-control': 'no-store' });
     res.end(js);
     return true;

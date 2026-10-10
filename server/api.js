@@ -6,6 +6,7 @@ import { preflight, switchBranch, undoLast } from './core/safety.js';
 import { listRepos, findRepo, upsertRepo, removeRepo, listLogs, addLog } from './core/store.js';
 import { pickFolder, dialogSupported } from './core/dialog.js';
 import { listDrives, startScan, getScan, cancelScan, publicJob, probeFolder } from './core/scanner.js';
+import { VERSION } from './core/util.js';
 import {
   authStatus,
   startDeviceFlow,
@@ -97,7 +98,7 @@ export async function handleApi(req, res, url) {
 
   // GET /api/health
   if (seg[0] === 'health') {
-    return send(res, 200, { ok: true, name: 'git-manager', version: '0.1.0', time: new Date().toISOString() });
+    return send(res, 200, { ok: true, name: 'git-manager', version: VERSION, time: new Date().toISOString() });
   }
 
   // GET /api/repos
