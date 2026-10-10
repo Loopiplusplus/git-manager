@@ -24,6 +24,7 @@ import { promisify } from 'node:util';
 
 const exec = promisify(execFile);
 
+const ROOT = path.resolve(import.meta.dirname, '..');
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'gm-branch-'));
 process.env.GM_DATA_DIR = TMP;
 
@@ -295,7 +296,7 @@ console.log('[4] HTTP 路由：/branches/removal 不能被 /branches 抢先匹�
   fs.mkdirSync(httpData, { recursive: true });
 
   const child = spawn(process.execPath, ['server/index.js', '--port', '0', '--quiet'], {
-    cwd: path.resolve(import.meta.dirname, '..'),
+    cwd: ROOT,
     env: { ...process.env, GM_DATA_DIR: httpData },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -426,6 +427,32 @@ console.log('[5] 前端契约：renderBranches 必须渲染出三个操作入口
   check('日志：删除分支有中文标签', logs.includes('删除分支'));
   check('日志：恢复分支有中文标签', logs.includes('恢复分支'));
   check('日志：不再裸漏 branch-create 这类原始 op', !logs.includes('>branch-create<'));
+
+  /* ---- 接线契约：把「按钮存在」和「点了有反应」之间的那段路也测掉 ----
+   * 上面只证明 renderBranches 渲染出了 data-action；如果 main.js 忘了加对应分支，
+   * 按钮点了没反应 —— 静态渲染测试是看不出来的。这里做源码级契约检查。 */
+  const mainSrc = fs.readFileSync(path.join(ROOT, 'web/js/main.js'), 'utf8');
+  const paletteSrc = fs.readFileSync(path.join(ROOT, 'web/js/palette.js'), 'utf8');
+  const apiSrc = fs.readFileSync(path.join(ROOT, 'web/js/api.js'), 'utf8');
+
+  for (const act of ['branch-new', 'branch-delete', 'branch-restore']) {
+    check(`main.js 里接了 ${act} 的点击分支`, new RegExp(`action === '${act}'`).test(mainSrc));
+  }
+  check('main.js 导入了 openCreateBranch', /openCreateBranch/.test(mainSrc));
+  check('main.js 导入了 openDeleteBranch', /openDeleteBranch/.test(mainSrc));
+  check('main.js 把删除点列表传给了 renderBranches', /renderBranches\(\{[^}]*deleted/.test(mainSrc));
+  check('palette.js 导出 openCreateBranch', /export async function openCreateBranch/.test(paletteSrc));
+  check('palette.js 导出 openDeleteBranch', /export async function openDeleteBranch/.test(paletteSrc));
+  check('palette.js 的强制删除要读二次确认输入框', /#confirm-name/.test(paletteSrc));
+  check('palette.js 在 NOT_MERGED 时引导到强制删除', /NOT_MERGED/.test(paletteSrc));
+
+  for (const m of ['branchRemoval', 'branchesDeleted', 'createBranch', 'deleteBranch', 'restoreBranch']) {
+    check(`api.js 定义 ${m}()`, new RegExp(`\\b${m}:`).test(apiSrc));
+  }
+  // 前端方法必须打到对应的后端路由，不能少 / 不能拼错
+  check('api.js 的删除打到 /branches/delete', /branches\/delete/.test(apiSrc));
+  check('api.js 的恢复打到 /branches/restore', /branches\/restore/.test(apiSrc));
+  check('api.js 的评估打到 /branches/removal', /branches\/removal/.test(apiSrc));
 }
 
 /* ================= 汇总 ================= */
