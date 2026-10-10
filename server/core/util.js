@@ -16,7 +16,7 @@ export const VERSION = (() => {
   } catch {
     /* 打包后端忽略 */
   }
-  return '0.2.0';
+  return '0.2.1';
 })();
 
 export function nowIso() {
