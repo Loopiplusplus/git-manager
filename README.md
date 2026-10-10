@@ -308,6 +308,7 @@ data/                      运行时缓存（仓库列表 + 操作日志 + 加�
 
 ```bash
 node scripts/check-oauth.mjs         # 设备码流程状态机（含失败分支）
+node scripts/check-gh-poll.mjs       # 授权面板的轮询循环（DOM 桩 + 手动定时器驱动）
 node scripts/check-github-guard.mjs  # 写操作守卫 + 路径穿越 + clone 危险 flag
 node scripts/check-clone-e2e.mjs     # 真实克隆端到端（需网络）
 node scripts/check-ui.mjs            # 前端模块加载与渲染函数

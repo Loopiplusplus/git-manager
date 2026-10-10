@@ -830,21 +830,61 @@ export async function openGithubAuthorize(ctx) {
   };
 
   let currentStep = 0;
+  let pollFailures = 0;
+
+  /**
+   * 重绘到已挂载的遮罩层上。
+   *
+   * ⚠️ 这里必须绕开 mount()。mount() 会先调用「上一个面板」的 dispose，
+   * 而本面板的 dispose 正是 stopGhPoll() —— 于是第一次轮询重绘就会把自己
+   * 清掉（清掉定时器、清空 ghSession、还会顺带取消服务端会话）。
+   * 症状：设备码界面上用户明明完成了授权，页面却永远停在等待态。
+   */
+  const repaint = (html) => {
+    const o = $('#overlay');
+    o.innerHTML = html;
+    o.hidden = false;
+    return o;
+  };
 
   const tick = async () => {
     if (!ghSession) return;
     let st;
     try {
       st = await api.ghDevicePoll(ghSession);
+      pollFailures = 0;
     } catch (e) {
-      mount(`<div class="modal"><div class="modal-head"><h3 class="modal-title">授权中断</h3></div><div class="modal-body"><div class="note note-err">${esc(e.message)}</div></div><div class="modal-foot"><button class="btn" data-act="cancel">关闭</button></div></div>`);
-      $('#overlay').querySelector('[data-act="cancel"]').addEventListener('click', closeOverlay);
+      // 会话真的没了（服务重启过 / 已被取消）→ 只能重新发起
+      if (e.status === 404) {
+        ghSession = null;
+        repaint(`<div class="modal">
+          <div class="modal-head"><h3 class="modal-title">授权会话已失效</h3>
+            <p class="modal-sub">本地服务可能重启过，请重新发起授权</p></div>
+          <div class="modal-body"><div class="note note-err">${esc(e.message)}</div></div>
+          <div class="modal-foot"><button class="btn" data-act="cancel">关闭</button></div>
+        </div>`).querySelector('[data-act="cancel"]').addEventListener('click', closeOverlay);
+        return;
+      }
+      // 网络抖动（本机开代理时很常见）→ 容忍几次。
+      // 否则一次闪断就把整个授权流程毁掉，用户只看到「授权中断」而不知所以。
+      pollFailures += 1;
+      if (pollFailures < 5) {
+        ghTimer = setTimeout(tick, 3000);
+        return;
+      }
+      ghSession = null;
+      repaint(`<div class="modal">
+        <div class="modal-head"><h3 class="modal-title">授权中断</h3>
+          <p class="modal-sub">连续 ${pollFailures} 次无法连接本地服务</p></div>
+        <div class="modal-body"><div class="note note-err">${esc(e.message)}</div></div>
+        <div class="modal-foot"><button class="btn" data-act="cancel">关闭</button></div>
+      </div>`).querySelector('[data-act="cancel"]').addEventListener('click', closeOverlay);
       return;
     }
     if (!ghSession) return;
 
     currentStep = st.status === 'pending' ? Math.min(currentStep + 1, 2) : currentStep;
-    const o = mount(paint(st));
+    const o = repaint(paint(st));
     o.querySelector('[data-act="cancel"]').addEventListener('click', () => {
       if (st.status === 'ok') { stopGhPoll(); closeOverlay(); ctx.refresh?.(); return; }
       const id = ghSession;
