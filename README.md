@@ -43,6 +43,9 @@ vibe coding 的项目往往**能跑但难维护**：临时分支堆积、WIP 提
 ### 二、本地只读分析（默认，不改动任何东西）
 
 - 仓库概览：提交总数、分支数、体积、贡献者、时间跨度
+- **记住上次打开的仓库**：关闭前停留在哪个仓库，下次打开就回到哪个（服务端持久化，
+  浏览器换一个或清缓存都不影响）。若记住的仓库已被移除或目录已不存在，自动降级到
+  最后接入的仓库，不会卡在空状态。
 - 健康度评分（0–100）+ 可执行的问题清单
 - 12 周提交热力图
 - **AI 协作痕迹**（多信号推断，可解释、纯本地、不读文件内容）
@@ -82,7 +85,10 @@ vibe coding 的项目往往**能跑但难维护**：临时分支堆积、WIP 提
 
 **读（只读）**
 - 账号身份条：头像、登录名、公开仓库数、当前 API 配额（含重置倒计时）
-  - 头像走**本机代理**（`/api/gh/avatar`）：页面 CSP 是 `img-src 'self'`，外域头像会被直接拦掉；而且浏览器直连 `avatars.githubusercontent.com` 在国内也常年失败。由服务端代取后回传，失败则回退到字形。
+  - 头像由服务端转成 **`data:` URL** 随 `/api/gh/status` 一起返回，**不需要任何额外请求**。
+    原因有两个：页面 CSP 是 `img-src 'self' data:`，外域头像会被直接拦掉；而且浏览器直连
+    `avatars.githubusercontent.com` 在国内也常年失败。走 `data:` 后与令牌、网络、CSP 全部无关。
+    另外保留了同源代理 `/api/gh/avatar`（HTTP 图片请求）作为备用路径，并带进程内缓存。
 - 仓库列表：搜索、公/私有过滤、按更新时间/星标/名称排序、分页
 - 单仓库详情：默认分支、语言、体积、最后推送时间
 - 文件树浏览 + 分支切换：目录逐层展开、文件内容只读预览、二进制文件自动识别并拒渲染
@@ -90,6 +96,9 @@ vibe coding 的项目往往**能跑但难维护**：临时分支堆积、WIP 提
 **把本地仓库提交并推送（新增）**
 - 本地仓库视图顶栏与概览页都有「提交并推送」入口 —— 之前根本没有这个能力，用户只能跑命令行
 - 向导：状态检查 → 选目标（**新建 GitHub 仓库** 或 **推送到已有仓库**）→ 勾选要一并提交的改动 → 提交信息 → **输入仓库名二次确认** → 执行
+- **「本地仓库在 GitHub 上有没有对应」是怎么判断的**（两层，且如实标注置信度）：
+  1. **看 `origin`**：`git remote get-url origin` —— 但这只反映**本地 `.git/config` 里配了什么**。没配 origin 不代表 GitHub 上没有，origin 指向别的托管也不代表没有。
+  2. **按目录名去账号里找同名仓库**：拿本地目录名调 `GET /repos/{login}/{dirname}`。命中时界面明确写成「**疑似**已有对应」并说明依据是**名字匹配而非凭据级事实**，由用户确认，绝不自动决定推到哪。
 - 一次完成：`git add` → `git commit` → `remote add/set-url origin` → `git push -u origin <branch>`
 - 新建仓库时**不生成初始 README**，否则远端先有一个本地没有的提交，推送会因历史分叉被拒
 - 提交前自动打一个 `refs/gm/prepush/*` 快照，随时可回退
@@ -286,7 +295,8 @@ data/                      运行时缓存（仓库列表 + 操作日志 + 加�
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/api/health` | 健康检查 |
-| GET | `/api/repos` | 已接入仓库列表 |
+| GET | `/api/repos` | 已接入仓库列表（含 `lastRepoId` / `startupRepoId`） |
+| POST | `/api/repos/active` | 记住当前选中的仓库 `{ id }`，下次打开恢复 |
 | POST | `/api/repos/open` | 接入仓库 `{ path }` |
 | DELETE | `/api/repos/:id` | 从列表移除（不动磁盘） |
 | GET | `/api/repos/:id/overview` | 总览 |
@@ -298,7 +308,7 @@ data/                      运行时缓存（仓库列表 + 操作日志 + 加�
 | POST | `/api/repos/:id/preflight` | 切换前检查 `{ target }` |
 | POST | `/api/repos/:id/switch` | 安全切换 `{ target, strategy, message }` |
 | POST | `/api/repos/:id/undo` | 撤销上一次切换 |
-| GET | `/api/repos/:id/publish-status` | 发布状态：分支/改动清单/origin/领先落后/提交身份 |
+| GET | `/api/repos/:id/publish-status` | 发布状态：分支/改动清单/origin/领先落后/提交身份；本地没绑 GitHub 时附带 `githubMatch`（按目录名找到的同名仓库，`?probe=0` 可关） |
 | POST | `/api/repos/:id/publish` | 提交并推送 `{ mode, repoName/owner+name, message, includeChanges, branch, confirm }` |
 
 ### 文件系统

@@ -9,10 +9,12 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..', '..');
-export const DATA_DIR = path.join(ROOT, 'data');
+// GM_DATA_DIR 用于测试隔离（与 secrets.js 保持同一约定），也让桌面端能把数据挪到用户目录。
+// ★ 曾经这里写死成 ROOT/data，于是测试跑一遍就把真实的 data/store.json 写脏了 —— 别再写死。
+export const DATA_DIR = process.env.GM_DATA_DIR ? path.resolve(process.env.GM_DATA_DIR) : path.join(ROOT, 'data');
 const FILE = path.join(DATA_DIR, 'store.json');
 
-let state = { repos: [], logs: [] };
+let state = { repos: [], logs: [], lastRepoId: null };
 let loaded = false;
 
 function load() {
@@ -25,10 +27,12 @@ function load() {
       state = {
         repos: Array.isArray(raw.repos) ? raw.repos : [],
         logs: Array.isArray(raw.logs) ? raw.logs : [],
+        // 上次选中的仓库：下次打开直接恢复，而不是硬编码「列表里的第一个」
+        lastRepoId: typeof raw.lastRepoId === 'string' ? raw.lastRepoId : null,
       };
     }
   } catch {
-    state = { repos: [], logs: [] };
+    state = { repos: [], logs: [], lastRepoId: null };
   }
 }
 
@@ -64,7 +68,39 @@ export function upsertRepo(repo) {
 export function removeRepo(id) {
   load();
   state.repos = state.repos.filter((r) => r.id !== id);
+  // 被移除的正好是「上次打开的」时候，一并清掉，避免下次恢复到一个已不存在的仓库
+  if (state.lastRepoId === id) state.lastRepoId = null;
   save();
+}
+
+/** 上次选中的仓库 id（关闭前停留在哪个仓库，下次打开就回到哪个） */
+export function getLastRepoId() {
+  load();
+  return state.lastRepoId || null;
+}
+
+export function setLastRepoId(id) {
+  load();
+  state.lastRepoId = id ? String(id) : null;
+  save();
+  return state.lastRepoId;
+}
+
+/**
+ * 计算「下次打开应该落到哪个仓库」。
+ * 优先级：记住的那个 → 最后一个接入的 → 任意一个存在的。
+ * 记住的仓库若已从列表移除或目录已不存在，自动降级，不会卡在空状态。
+ */
+export function resolveStartupRepo(existsFn) {
+  load();
+  const repos = state.repos.slice().sort((a, b) => String(b.addedAt).localeCompare(String(a.addedAt)));
+  const alive = (r) => (typeof existsFn === 'function' ? !!existsFn(r) : true);
+
+  if (state.lastRepoId) {
+    const remembered = repos.find((r) => r.id === state.lastRepoId);
+    if (remembered && alive(remembered)) return remembered;
+  }
+  return repos.find(alive) || repos[0] || null;
 }
 
 export function listLogs(repoId, limit = 100) {

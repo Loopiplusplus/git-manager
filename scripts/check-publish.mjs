@@ -212,10 +212,17 @@ console.log('\n[9] publish 守卫');
 {
   // authStatus 会去 /user 验活；这里桩掉，让 connected=true，从而走到后续守卫
   const fakeFetch = async (url) => {
-    if (String(url).includes('/user')) {
-      return { ok: true, headers: new Headers(), json: async () => ({ login: 'tester', id: 42, name: 'Tester', avatar_url: '', html_url: '' }) };
-    }
-    return { ok: true, headers: new Headers(), json: async () => ({}) };
+    const payload = String(url).includes('/user')
+      ? { login: 'tester', id: 42, name: 'Tester', avatar_url: '', html_url: '' }
+      : {};
+    return {
+      ok: true,
+      status: 200,
+      headers: new Headers(),
+      json: async () => payload,
+      // ★ ghFetch 读的是 res.text() 再自己 JSON.parse，只给 json() 是不够的
+      text: async () => JSON.stringify(payload),
+    };
   };
   auth.setFetchImpl(fakeFetch);
   gh.setFetchImpl(fakeFetch);
@@ -346,6 +353,141 @@ console.log('\n[12] 提交前快照引用合法');
   check('该 ref 指向 HEAD', show.ok === true && /^[0-9a-f]{40}$/.test(show.out.trim()));
   const heads = await gitOk(repo, ['for-each-ref', '--format=%(refname)', 'refs/gm/']);
   check('clean/branch 列表不会被它污染（独立命名空间）', heads.ok === true && heads.out.includes('refs/gm/prepush/'));
+}
+
+/* ================= 13. 记住上次打开的仓库 ================= */
+console.log('\n[13] 记住上次打开的仓库（而不是永远给列表第一个）');
+{
+  const store = await import('../server/core/store.js');
+
+  const mk = (id, exists = true) => ({ id, path: path.join(TMP, id), name: id, addedAt: `2026-10-10T0${id.slice(-1)}:00:00.000Z` });
+  // 列表按 addedAt 倒序 → 后接入的排前面，所以「列表第一个」跟「用户上次用的」常常不是同一个
+  store.upsertRepo(mk('repo-1'));
+  store.upsertRepo(mk('repo-2'));
+  store.upsertRepo(mk('repo-3'));
+
+  const existsFn = () => true;
+
+  store.setLastRepoId(null);
+  const auto = store.resolveStartupRepo(existsFn);
+  check('没记住过时回退到「最后接入的」', auto?.id === 'repo-3', auto?.id);
+
+  store.setLastRepoId('repo-1');
+  const restored = store.resolveStartupRepo(existsFn);
+  check('★ 记住过时优先恢复它（而不是列表第一个）', restored?.id === 'repo-1', restored?.id);
+  check('getLastRepoId 能读回', store.getLastRepoId() === 'repo-1');
+
+  // 记住的仓库目录没了 → 不能卡在它上面
+  const onlyRepo2Exists = (r) => r.id !== 'repo-1';
+  const fallback = store.resolveStartupRepo(onlyRepo2Exists);
+  check('记住的仓库已不存在时自动降级', fallback?.id !== 'repo-1' && !!fallback?.id, fallback?.id);
+
+  // 被移除的正好是记住的那个 → 一起清掉
+  store.setLastRepoId('repo-2');
+  store.removeRepo('repo-2');
+  check('移除记住的仓库时一并清空记录', store.getLastRepoId() === null, String(store.getLastRepoId()));
+  check('清空后仍能解析出一个可用仓库', !!store.resolveStartupRepo(existsFn));
+
+  // 记录指向一个不存在的 id：不能崩，兜底给列表第一个
+  store.setLastRepoId('whatever');
+  const last = store.resolveStartupRepo(() => false);
+  check('记录指向不存在的仓库时不崩、兜底给出列表第一个', last?.id === 'repo-3', last?.id);
+}
+
+/* ================= 14. GitHub 同名仓库探测 ================= */
+console.log('\n[14] 本地仓库有没有 GitHub 对应（目录名推断）');
+{
+  const { findGithubCounterpart } = await import('../server/core/publish.js');
+
+  const dir = path.join(TMP, 'my-cool-project');
+  fs.mkdirSync(dir, { recursive: true });
+
+  // 账号里存在同名仓库
+  gh.setFetchImpl(async (url) => {
+    const u = String(url);
+    let payload = null;
+    let status = 200;
+    if (u.includes('/user')) {
+      payload = { login: 'tester', id: 42, name: 'Tester' };
+    } else if (u.includes('/repos/tester/my-cool-project')) {
+      payload = { id: 9, name: 'my-cool-project', full_name: 'tester/my-cool-project', private: true, default_branch: 'main', pushed_at: '2026-10-01T00:00:00Z', html_url: 'https://github.com/tester/my-cool-project', owner: { login: 'tester' } };
+    } else {
+      status = 404;
+      payload = { message: 'Not Found' };
+    }
+    return {
+      ok: status < 400,
+      status,
+      headers: new Headers(),
+      json: async () => payload,
+      text: async () => JSON.stringify(payload),
+    };
+  });
+
+  const hit = await findGithubCounterpart(dir);
+  check('★ 账号里有同名仓库时能认出来', hit?.fullName === 'tester/my-cool-project', JSON.stringify(hit));
+  check('  └ 带上私有性与默认分支', hit?.private === true && hit?.defaultBranch === 'main');
+  check('★ 标注判断依据是名字匹配（不是凭据级事实）', hit?.basis === 'name-match', hit?.basis);
+
+  // 账号里没有同名仓库
+  const ghost = path.join(TMP, 'no-such-repo-here');
+  fs.mkdirSync(ghost, { recursive: true });
+  const miss = await findGithubCounterpart(ghost);
+  check('没有同名仓库时返回 null', miss === null, JSON.stringify(miss));
+
+  // 目录名不是合法仓库名时不能去调 API、更不能炸
+  const weird = path.join(TMP, 'has space');
+  fs.mkdirSync(weird, { recursive: true });
+  const illegal = await findGithubCounterpart(weird);
+  check('目录名不合法时安全返回 null', illegal === null, JSON.stringify(illegal));
+
+  // 没连接 GitHub 时也不能炸（连身份都取不到 → 直接返回 null）
+  gh.setFetchImpl(async () => ({
+    ok: false,
+    status: 401,
+    headers: new Headers(),
+    json: async () => ({ message: 'Bad credentials' }),
+    text: async () => JSON.stringify({ message: 'Bad credentials' }),
+  }));
+  const offline = await findGithubCounterpart(dir);
+  check('未授权/取不到身份时安全返回 null', offline === null, JSON.stringify(offline));
+}
+
+/* ================= 15. 头像 data URL（与令牌、网络、CSP 全无关） ================= */
+console.log('\n[15] 头像转 data URL + 进程内缓存');
+{
+  gh.clearAvatarCache();
+
+  const pngBytes = Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex'); // PNG 魔数开头即可
+  let calls = 0;
+  gh.setFetchImpl(async (url) => {
+    calls++;
+    check('抓取的是白名单内的头像地址', /^https:\/\/(github\.com|avatars\.githubusercontent\.com)\//.test(String(url)), String(url));
+    return {
+      ok: true,
+      headers: new Headers({ 'content-type': 'image/png' }),
+      arrayBuffer: async () => pngBytes.buffer.slice(pngBytes.byteOffset, pngBytes.byteOffset + pngBytes.byteLength),
+    };
+  });
+
+  const d1 = await gh.avatarDataUrl({ login: 'tester', size: 160 });
+  check('★ 返回的是 data: URL（CSP img-src 显式放行 data:）', d1.startsWith('data:image/png;base64,'), d1.slice(0, 40));
+  check('  └ base64 内容可还原', Buffer.from(d1.split(',')[1], 'base64').equals(pngBytes));
+  check('  └ 抓取发生了一次', calls === 1, String(calls));
+
+  const d2 = await gh.avatarDataUrl({ login: 'tester', size: 160 });
+  check('★ 第二次命中缓存，不再重复抓取', calls === 1 && d2 === d1, `calls=${calls}`);
+
+  // 头像抓取失败不能让状态接口整体失败（调用方会 catch）
+  gh.clearAvatarCache();
+  gh.setFetchImpl(async () => ({ ok: false, status: 500, headers: new Headers(), json: async () => ({}) }));
+  let threw = false;
+  try {
+    await gh.avatarDataUrl({ login: 'tester' });
+  } catch {
+    threw = true;
+  }
+  check('抓取失败时抛错（由调用方降级处理，而不是返回坏 data URL）', threw === true);
 }
 
 console.log('');

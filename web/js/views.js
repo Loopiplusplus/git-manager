@@ -565,10 +565,11 @@ export function renderGithub({ auth, net, repos, error, filter = {}, logs = [] }
    * 头像有两个坑：
    *   1. 页面 CSP 是 `img-src 'self' data:`，外域头像会被直接拦掉；
    *   2. 就算放开 CSP，浏览器直连 avatars.githubusercontent.com 在国内也常年失败。
-   * 所以统一改走本机代理（同源、`'self'` 就够），失败时再回退到字形。
+   * 所以优先用服务端随状态一起返回的 **data: URL**（不需要额外请求，与令牌/网络全无关），
+   * 退而求其次才是同源代理，最后才直连原地址。
    * 注意 CSP 是 `script-src 'self'`，内联 onerror 会被拦，错误处理在 main.js 里挂。
    */
-  const avatarSrc = v.proxyAvatar || v.avatar;
+  const avatarSrc = v.avatarDataUrl || v.proxyAvatar || v.avatar;
   const avatar = avatarSrc
     ? `<span class="gh-avatar-slot"><img class="gh-avatar" src="${esc(avatarSrc)}" alt="" referrerpolicy="no-referrer"><span class="gh-avatar gh-avatar-fallback" hidden>◍</span></span>`
     : '<span class="gh-avatar-slot"><span class="gh-avatar gh-avatar-fallback">◍</span></span>';

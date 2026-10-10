@@ -524,3 +524,39 @@ export async function fetchAvatar(input = {}) {
 
   return { buffer: buf, contentType, bytes: buf.length, url: target };
 }
+
+/* ---- 头像转 data: URL ---- */
+
+/**
+ * 为什么还要转 data: URL，而不是让页面直接 <img src="/api/gh/avatar?...">：
+ *
+ * `<img>` 无法携带自定义请求头，所以那个路由只能额外接受 `?t=<token>`。
+ * 于是头像的成败就挂在了「查询串里的令牌还有效」这一条上 —— 服务一重启令牌就换，
+ * 没刷新的页面立刻裂图；再加上 CSP 的 img-src 限制，失败路径太多。
+ *
+ * 改成服务端转 data: URL 后（`img-src 'self' data:` 本就放行 data:），
+ * 头像随 `/api/gh/status` 一起返回，**不需要任何额外请求**，与令牌、网络、CSP 全部无关。
+ * 结果在进程内缓存，一个服务器生命周期只真正抓一次。
+ */
+const AVATAR_TTL_MS = 60 * 60 * 1000;
+const AVATAR_CACHE_MAX = 40;
+const avatarCache = new Map(); // 解析后的头像地址 → { dataUrl, at }
+
+export async function avatarDataUrl(input = {}) {
+  const target = resolveAvatarUrl(input);
+  const hit = avatarCache.get(target);
+  if (hit && Date.now() - hit.at < AVATAR_TTL_MS) return hit.dataUrl;
+
+  const { buffer, contentType } = await fetchAvatar(input);
+  const dataUrl = `data:${contentType};base64,${buffer.toString('base64')}`;
+
+  if (avatarCache.size >= AVATAR_CACHE_MAX) {
+    avatarCache.delete(avatarCache.keys().next().value);
+  }
+  avatarCache.set(target, { dataUrl, at: Date.now() });
+  return dataUrl;
+}
+
+export function clearAvatarCache() {
+  avatarCache.clear();
+}

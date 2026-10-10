@@ -22,7 +22,7 @@ const NAV = [
   { id: 'github', label: 'GitHub', ico: '⌂' },
 ];
 
-const state = { repos: [], repo: null, view: 'overview', ghScope: 'write', ghFilter: { q: '', visibility: 'all' }, ghRepos: [], ghAuth: null, ghNet: null, ghError: null, ghLogs: [] };
+const state = { repos: [], repo: null, startupRepoId: null, view: 'overview', ghScope: 'write', ghFilter: { q: '', visibility: 'all' }, ghRepos: [], ghAuth: null, ghNet: null, ghError: null, ghLogs: [] };
 let seq = 0;
 
 /* ---------------- 导航 ---------------- */
@@ -264,8 +264,9 @@ async function renderGh() {
 /* ---------------- 仓库 ---------------- */
 
 async function loadRepos() {
-  const { repos } = await api.listRepos();
+  const { repos, startupRepoId } = await api.listRepos();
   state.repos = repos;
+  state.startupRepoId = startupRepoId || null;
   if (state.repo && !repos.some((r) => r.id === state.repo.id)) state.repo = null;
   return repos;
 }
@@ -273,6 +274,8 @@ async function loadRepos() {
 async function selectRepo(id) {
   const repo = state.repos.find((r) => r.id === id) || { id, path: id, name: id };
   state.repo = repo;
+  // 记住这次的选择，下次打开直接恢复（失败不影响主流程）
+  api.ghSetActiveRepo?.(id).catch(() => {});
   await render();
   await updateUndoButton();
 }
@@ -415,6 +418,9 @@ window.addEventListener('unhandledrejection', (e) => toast(e.reason?.message || 
 
 (async function boot() {
   renderNav();
+  // 把构建版本显示出来：排查「我是不是还在用旧页面」时非常有用
+  const tag = $('#build-tag');
+  if (tag) tag.textContent = `v${window.__GM__?.version || '?'}`;
   try {
     await api.health();
   } catch {
@@ -423,7 +429,12 @@ window.addEventListener('unhandledrejection', (e) => toast(e.reason?.message || 
   }
   const repos = await loadRepos();
   if (repos.length) {
-    const first = repos.find((r) => r.exists) || repos[0];
+    // 优先恢复「上次关闭前停留的那个仓库」，而不是列表里第一个。
+    // 服务端已经把优先级算好了（记住的 → 最后接入的 → 任意存在的），这里直接用。
+    const first =
+      repos.find((r) => r.id === state.startupRepoId) ||
+      repos.find((r) => r.exists) ||
+      repos[0];
     await selectRepo(first.id);
   } else {
     await render();

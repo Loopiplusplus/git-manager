@@ -247,6 +247,19 @@ console.log('\n[8] 提交入口：概览卡片 / 顶栏 / 头像代理');
   check('  └ 兜底默认隐藏（靠 [hidden] 规则生效）', /gh-avatar-fallback" hidden/.test(withProxy));
   check('  └ 没有内联 onerror（CSP 会拦）', !/onerror=/.test(withProxy));
 
+  // ★ 首选 data: URL：不需要额外请求，与令牌/网络/CSP 全无关，结构上不可能失败
+  const withData = views.renderGithub({
+    auth: { connected: true, method: 'oauth', viewer: { login: 'octocat', avatar: 'https://avatars.githubusercontent.com/u/1', proxyAvatar: '/api/gh/avatar?login=octocat&t=x', avatarDataUrl: 'data:image/png;base64,AAAA', scopes: ['repo'] } },
+    net: { verdict: 'ok', targets: [] },
+    repos: [],
+    filter: {},
+  });
+  check('★ 有 data: URL 时优先用它（连请求都不发）', withData.includes('src="data:image/png;base64,AAAA"'), '');
+  check('  └ 此时不再退到代理地址', !withData.includes('/api/gh/avatar?'), '');
+  // 服务端的 data: 方案能成立，前提是 CSP 的 img-src 里有 data: —— 这条断言守的就是这个前提
+  const csp = fs.readFileSync(path.join(ROOT, 'web/index.html'), 'utf8');
+  check('★ CSP 的 img-src 放行 data:', /img-src[^;"]*data:/.test(csp), csp.match(/img-src[^;"]*/)?.[0] || '(没找到 img-src)');
+
   const noAvatar = views.renderGithub({
     auth: { connected: true, method: 'oauth', viewer: { login: 'x', scopes: [] } },
     net: { verdict: 'ok', targets: [] },

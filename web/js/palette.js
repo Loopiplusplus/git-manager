@@ -1561,15 +1561,17 @@ export async function openPublishWizard(ctx) {
   /* ---- 工作区与提交历史的状态提示 ---- */
   const ch = st.changes || { total: 0, files: [] };
   const hasGitIdentity = !!st.identity?.configured;
+  const match = st.githubMatch || null;
 
   /* ---- 表单 ---- */
   const state = {
-    mode: st.remote.isGithub ? 'existing' : 'create',
+    // 本地已经绑了 GitHub 远端，或者账号里存在同名仓库 → 默认「推送到已有仓库」
+    mode: st.remote.isGithub || match ? 'existing' : 'create',
     repoName: repo.name || '',
     isPrivate: true,
     description: '',
-    owner: st.remote.owner || gh.viewer?.login || '',
-    name: st.remote.name || '',
+    owner: st.remote.owner || match?.owner || gh.viewer?.login || '',
+    name: st.remote.name || match?.name || '',
     branch: st.branch,
     includeChanges: ch.total > 0,
     message: '',
@@ -1606,6 +1608,18 @@ export async function openPublishWizard(ctx) {
     </div>
     <div class="modal-body">
       ${st.reasons.length ? `<div class="note note-err" style="margin-bottom:14px">${st.reasons.map((r) => esc(r)).join('<br>')}</div>` : ''}
+      ${match && !st.remote.isGithub ? `<div class="note note-warn" style="margin-bottom:14px">
+        <b>这个本地仓库在 GitHub 上疑似已有对应：</b><span class="mono">${esc(match.fullName)}</span>
+        ${match.private ? '<span class="badge b-orange">私有</span>' : '<span class="badge b-gray">公开</span>'}
+        ${match.defaultBranch ? `· 默认分支 <span class="mono">${esc(match.defaultBranch)}</span>` : ''}
+        <div class="tiny muted" style="margin-top:6px">
+          判断依据是<b>本地目录名与账号内仓库同名</b>，不是凭据级的事实认定 —— 本地 <span class="mono">.git/config</span> 里并没有配 GitHub 远端。
+          已替你预选它；若这不是你要推的地方，切到左边「新建 GitHub 仓库」。
+        </div>
+      </div>` : ''}
+      ${!st.remote.isGithub && !match && st.remote.exists ? `<div class="note" style="margin-bottom:14px">
+        当前 origin 指向 <span class="mono">${esc(st.remote.url)}</span>（不是 GitHub），且账号里没有同名仓库，因此默认按「新建仓库」处理。
+      </div>` : ''}
 
       <p class="section-title" style="margin-top:0">1 · 推到哪个仓库</p>
       <div class="seg" id="pub-mode">

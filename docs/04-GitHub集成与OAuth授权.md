@@ -294,6 +294,69 @@ GIT_CONFIG_VALUE_0=Authorization: Basic <base64(x-access-token:TOKEN)>
 可以在 GitHub 上把权限精确限制为「指定仓库 + Contents 读写」。
 因此本系统**同时保留 PAT 通道**，并把取舍写在界面上，由你决定，而不是替你决定。
 
+### 5.6 头像加载：绕了三圈才找到真正的主因
+
+头像「一直加载不出来」被反复反馈了三次。前两次都当成网络问题处理，**方向是错的**。
+真正的主因在页面自己身上：
+
+```html
+default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline';
+connect-src 'self'; img-src 'self' data:;
+```
+
+**`img-src 'self' data:` 会拦掉一切外域图片。** 也就是说即使网络完全通畅、
+`avatars.githubusercontent.com` 秒回，浏览器也**不会渲染**它。
+网络问题（国内直连 GitHub 头像域名常年失败）只是压在上面的第二层原因。
+
+方案迭代与各自的失败路径：
+
+| # | 方案 | 为什么不够好 |
+|---|---|---|
+| 1 | 页面直接 `<img src="https://avatars.githubusercontent.com/...">` | 被 CSP `img-src 'self'` 拦掉；且国内网络也不通。**两条都过不去。** |
+| 2 | 同源代理 `GET /api/gh/avatar?login=`，服务端代取后回传字节 | 能过 CSP（同源 → `'self'` 就够，**不需要放宽 CSP**），但仍然脆弱：`<img>` 无法携带自定义请求头，而 `/api/*` 全部要 `x-gm-token`，于是只能额外接受 `?t=<token>`。**服务一重启令牌就换**，没刷新的页面立刻裂图。 |
+| 3 | 服务端转成 **`data:` URL**，随 `/api/gh/status` 一起返回 | ✅ 采用 |
+
+**为什么 `data:` 是结构上不可能失败的方案**：它把头像变成响应体里的一段字符串，
+页面渲染时**不需要再发任何请求**。于是令牌是否有效、网络是否通、CSP 怎么配
+（`img-src` 本来就放行 `data:`）**全部与它无关**，失败路径归零。
+
+实现上的两个细节：
+
+- 转换结果在进程内缓存（TTL 1 小时，最多 40 条），一个服务生命周期只真正抓一次。
+- 同源代理 `/api/gh/avatar` **保留**，作为需要直接图片字节时的备用路径；它仍然是
+  唯一额外接受 `?t=<token>` 的路由。
+
+两个连带的、容易漏的点：
+
+- **CSP `script-src 'self'` 禁内联事件** —— 所以 `onerror="..."` 这种兜底写法会被拦，
+  必须在 JS 里 `addEventListener('error')` 挂。
+- 仅此还不够：图片**可能在监听器挂上之前就已经失败了**。必须补一次
+  `if (img.complete && img.naturalWidth === 0)` 的显式检查，否则回退字形不出现，
+  用户看到的就是一个空框。
+
+### 5.7 会话恢复：打开上次关闭前的仓库
+
+反馈是「打开的都是 dsh 那个项目」——因为启动逻辑取的是**列表里的第一个存在的仓库**，
+而列表按接入时间排序，dsh 恰好排在最前，与用户上次停留在哪里无关。
+
+改为服务端持久化「上次选中的仓库」，避免依赖浏览器本地存储（换浏览器或清缓存就丢）：
+
+| 层 | 做法 |
+|---|---|
+| 存储 | `data/store.json` 增加 `lastRepoId` 字段 |
+| 写入 | `POST /api/repos/active { id }`，在用户每次切换仓库时调用 |
+| 读取 | `GET /api/repos` 一并返回 `lastRepoId` 与已解析好的 `startupRepoId` |
+| 清理 | `removeRepo()` 时若删掉的正是 `lastRepoId`，一并置空 |
+
+由服务端单点决定落到哪个仓库（`resolveStartupRepo()`），优先级三级降级：
+
+```
+记住的那个  →  最后接入的  →  任意一个存在的
+```
+
+前一级失效就自动落到下一级。因此**记住的仓库被移除、或目录已不存在时不会卡在空状态**，
+也不会出现「恢复到一个已经打不开的路径」的情况。
+
 ---
 
 ## 6. 网络自检：为什么需要它
@@ -332,7 +395,7 @@ GitHub 的**域名是分开的**：
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/api/net/probe` | 网络自检（DNS + HTTPS） |
-| GET | `/api/gh/status` | 授权状态 + 凭据仓库信息（不含明文） |
+| GET | `/api/gh/status` | 授权状态 + 凭据仓库信息（不含明文）；`viewer.avatarDataUrl` 为**头像的 `data:` URL**，随本响应一起返回，页面无需再发请求 |
 | POST | `/api/gh/client-id` | 保存 client_id |
 | DELETE | `/api/gh/client-id` | 清除 client_id（不动已授权的 token） |
 | POST | `/api/gh/device/start` | 申请设备码 |
@@ -351,8 +414,10 @@ GitHub 的**域名是分开的**：
 | POST | `/api/gh/parse` | 解析仓库地址（不产生任何副作用） |
 | POST | `/api/gh/clone` | 克隆到本地 |
 | POST | `/api/gh/create-repo` | 新建**空仓库**（`auto_init: false`，否则推送会因历史分叉被拒） |
-| GET | `/api/gh/avatar` | 头像代理 `?login=` / `?u=`；主机白名单防 SSRF。因 `<img>` 带不了请求头，仅此路由额外接受 `?t=<token>` |
-| GET | `/api/repos/:id/publish-status` | 本地仓库发布状态（分支 / 改动清单 / origin / 领先落后 / 提交身份） |
+| GET | `/api/gh/avatar` | 头像代理 `?login=` / `?u=`；主机白名单防 SSRF。**备用路径** —— 页面默认用 `/api/gh/status` 里的 `data:` URL。因 `<img>` 带不了请求头，仅此路由额外接受 `?t=<token>` |
+| GET | `/api/repos` | 已接入仓库列表（含 `lastRepoId` / `startupRepoId`） |
+| POST | `/api/repos/active` | 记住当前选中的仓库 `{ id }`，下次打开恢复到它 |
+| GET | `/api/repos/:id/publish-status` | 本地仓库发布状态（分支 / 改动清单 / origin / 领先落后 / 提交身份）；本地没绑 GitHub 时附带 `githubMatch`（按目录名探测到的同名仓库，`basis: 'name-match'`，`?probe=0` 可关） |
 | POST | `/api/repos/:id/publish` | 本地仓库提交并推送（需 `confirm` == 仓库名，且校验先于网络调用） |
 | POST | `/api/fs/pick-file` | 原生文件选择器；`withContent` 时在选中瞬间读回内容 |
 
@@ -364,13 +429,19 @@ GitHub 的**域名是分开的**：
 
 | 脚本 | 覆盖 | 结果 |
 |---|---|---|
-| `check-oauth.mjs` | Device Flow 状态机（含 pending/slow_down/expired/denied/各错误码、device_code 不外泄、轮询闸门） | **48 项通过** |
-| `check-github-guard.mjs` |克隆 URL 白名单、路径越界、目标目录、sha 乐观锁、删除校验、体积上限 | **51 项通过** |
+| `check-oauth.mjs` | Device Flow 状态机（含 pending/slow_down/expired/denied/各错误码、device_code 不外泄、轮询闸门） | **70 项通过** |
+| `check-gh-poll.mjs` | 授权面板轮询生命周期（★ 防「轮询只跑一次就死」回归） | **27 项通过** |
+| `check-github-guard.mjs` | 克隆 URL 白名单、路径越界、目标目录、sha 乐观锁、删除校验、体积上限 | **51 项通过** |
+| `check-publish.mjs` | `push`/`remote`/`fetch` 窄化熔断、`isSafeGithubUrl` 边界、porcelain 解析、头像白名单 SSRF、仓库名校验、publish 守卫、**用本地裸仓库作 origin 的真实 push 端到端**、快照 ref、记住上次打开的仓库、同名仓库探测、头像 `data:` URL | **136 项通过** |
+| `check-ai-signals.mjs` | AI 协作痕迹多信号推断 | **52 项通过** |
+| `check-ui.mjs` | 前端视图渲染（含脏值检查）+ 本地仓库各视图回归 + CSP 与头像回退链 | **90 项通过** |
 | `check-clone-e2e.mjs` | **真实访问 github.com** 的克隆端到端 | **14 项通过** |
-| `check-ui.mjs` | 前端视图渲染（含脏值检查）+ 本地仓库各视图回归 | **43 项通过** |
-| `check-dpapi.mjs` | DPAPI 加解密往返（含中文与特殊字符） | 通过 |
+| `check-dpapi.mjs` | DPAPI 加解密往返（含中文与特殊字符） | **15 项通过** |
 | `check-net.mjs` | 各 GitHub 域名可达性诊断 | 诊断工具 |
-| `check-dialog.mjs` / `check-scan.mjs` | 原生选择器与只读扫描器（既有） | 通过 |
+| `check-dialog.mjs` | 原生文件夹选择器 | 通过 |
+
+> `check-scan.mjs` 是**探索性脚本**（需先手工起 4630 端口并传入夹具参数），
+> 不是自包含测试，因此不在上表内，也不参与回归。
 
 ### 仍未验证的部分
 

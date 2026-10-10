@@ -3,7 +3,7 @@ import { openRepo, repoId } from './core/repo.js';
 import { GitError } from './core/git.js';
 import { overview, branches, commits, activity, health } from './core/analyzer.js';
 import { preflight, switchBranch, undoLast } from './core/safety.js';
-import { listRepos, findRepo, upsertRepo, removeRepo, listLogs, addLog } from './core/store.js';
+import { listRepos, findRepo, upsertRepo, removeRepo, listLogs, addLog, getLastRepoId, setLastRepoId, resolveStartupRepo } from './core/store.js';
 import { pickFolder, pickFile, readTextFile, dialogSupported } from './core/dialog.js';
 import { listDrives, startScan, getScan, cancelScan, publicJob, probeFolder } from './core/scanner.js';
 import { VERSION } from './core/util.js';
@@ -30,9 +30,10 @@ import {
   deleteFile,
   createRepo,
   fetchAvatar,
+  avatarDataUrl,
 } from './core/github.js';
 import { cloneRepo, parseRepoRef } from './core/clone.js';
-import { publishStatus, publish } from './core/publish.js';
+import { publishStatus, publish, findGithubCounterpart } from './core/publish.js';
 import { probe as netProbe } from './core/netcheck.js';
 import { putSecret, deleteSecret, vaultInfo } from './core/secrets.js';
 
@@ -108,7 +109,19 @@ export async function handleApi(req, res, url) {
   // GET /api/repos
   if (seg[0] === 'repos' && seg.length === 1 && method === 'GET') {
     const repos = listRepos().map((r) => ({ ...r, exists: fs.existsSync(r.path) }));
-    return send(res, 200, { repos });
+    // 把「下次打开该落到哪个仓库」一并算好交给前端，
+    // 免得前端各写一套优先级，也免得「永远是列表里第一个」这种硬编码。
+    const startup = resolveStartupRepo((r) => fs.existsSync(r.path));
+    return send(res, 200, { repos, lastRepoId: getLastRepoId(), startupRepoId: startup?.id || null });
+  }
+
+  // POST /api/repos/active { id } —— 记住当前选中的仓库，下次打开恢复
+  if (seg[0] === 'repos' && seg[1] === 'active' && method === 'POST') {
+    const body = await readBody(req).catch(() => ({}));
+    const id = String(body.id || '').trim();
+    if (!id) return send(res, 400, { error: true, message: '缺少 id' });
+    if (!findRepo(id)) return send(res, 404, { error: true, message: `未登记该仓库：${id}` });
+    return send(res, 200, { ok: true, lastRepoId: setLastRepoId(id) });
   }
 
   // POST /api/repos/open  { path }
@@ -186,7 +199,17 @@ export async function handleApi(req, res, url) {
     if (method === 'GET' && resource === 'health') return send(res, 200, await health(repo));
 
     // 本地仓库 → GitHub 的发布状态与执行
-    if (method === 'GET' && resource === 'publish-status') return send(res, 200, await publishStatus(repo.path));
+    if (method === 'GET' && resource === 'publish-status') {
+      const st = await publishStatus(repo.path);
+      // 「本地仓库有没有 GitHub 对应」不能只看 origin：
+      // 没配 origin 不代表 GitHub 上没有同名仓库。补一次基于目录名的探测（可用 ?probe=0 关掉）。
+      if (!st.remote.isGithub && q.get('probe') !== '0') {
+        st.githubMatch = await findGithubCounterpart(repo.path).catch(() => null);
+      } else {
+        st.githubMatch = null;
+      }
+      return send(res, 200, st);
+    }
     if (method === 'POST' && resource === 'publish') {
       const body = await readBody(req);
       return send(res, 200, await publish(repo.path, body));
@@ -209,7 +232,17 @@ export async function handleApi(req, res, url) {
 
   // GET /api/gh/status
   if (seg[0] === 'gh' && seg[1] === 'status' && method === 'GET') {
-    return send(res, 200, { ...(await authStatus()), scopePresets: SCOPE_PRESETS });
+    const st = await authStatus();
+    // 头像直接用 data: URL 随状态返回：不需要额外请求，也与令牌/网络/CSP 无关
+    // （<img> 带不了请求头，走代理路由就得把令牌塞进查询串，服务一重启就失效）
+    if (st?.connected && st.viewer) {
+      st.viewer.avatarDataUrl = await avatarDataUrl({
+        login: st.viewer.login,
+        url: st.viewer.avatar,
+        size: 160,
+      }).catch(() => null);
+    }
+    return send(res, 200, { ...st, scopePresets: SCOPE_PRESETS });
   }
 
   // POST /api/gh/client-id { clientId }

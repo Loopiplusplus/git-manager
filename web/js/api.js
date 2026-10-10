@@ -47,6 +47,7 @@ function qs(obj) {
 export const api = {
   health: () => request('/health'),
   listRepos: () => request('/repos'),
+  ghSetActiveRepo: (id) => request('/repos/active', { method: 'POST', body: { id } }),
   openRepo: (path) => request('/repos/open', { method: 'POST', body: { path } }),
   removeRepo: (id) => request(`/repos/${enc(id)}`, { method: 'DELETE' }),
   overview: (id) => request(`/repos/${enc(id)}/overview`),

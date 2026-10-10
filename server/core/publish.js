@@ -1,6 +1,7 @@
+import path from 'node:path';
 import { git, gitOk, isSafeGithubUrl } from './git.js';
 import { getToken, authStatus } from './auth.js';
-import { createRepo, probeRepo, viewer } from './github.js';
+import { createRepo, probeRepo, viewer, getRepo } from './github.js';
 import { authGitEnv } from './clone.js';
 import { addLog } from './store.js';
 
@@ -156,6 +157,41 @@ export async function publishStatus(repoPath) {
 }
 
 /* ---------------- 执行发布 ---------------- */
+
+/**
+ * 「这个本地仓库在 GitHub 上有没有对应？」
+ *
+ * 光看 `git remote get-url origin` 是不够的 —— 那只反映**本地 .git/config 里配了什么**：
+ *   · 没配 origin，但 GitHub 上其实有同名仓库 → 本地读不出来
+ *   · origin 指向自建 GitLab / 别的托管 → 不等于「没有 GitHub 对应」
+ *   · 手动 clone 后把 remote 删掉 → 同样读不出来
+ *
+ * 所以再补一步：拿本地目录名去当前账号下找同名仓库。
+ * 这只是**基于名字的推断**，不是凭据级的事实认定，因此前端必须把它表述成「疑似对应」，
+ * 并让用户自己确认，绝不能替他自动决定推到哪个仓库。
+ */
+export async function findGithubCounterpart(repoPath) {
+  const me = await viewer().catch(() => null);
+  if (!me?.login) return null;
+
+  const localName = path.basename(path.resolve(String(repoPath || '')));
+  if (!localName || !/^[A-Za-z0-9._-]+$/.test(localName) || /^\.+$/.test(localName)) return null;
+
+  const r = await getRepo(me.login, localName).catch(() => null);
+  if (!r) return null;
+
+  return {
+    owner: me.login,
+    name: r.name,
+    fullName: `${me.login}/${r.name}`,
+    private: !!r.private,
+    defaultBranch: r.defaultBranch || null,
+    pushedAt: r.pushedAt || null,
+    url: r.htmlUrl || `https://github.com/${me.login}/${r.name}`,
+    localName,
+    basis: 'name-match',
+  };
+}
 
 function sanitizeRefPart(s) {
   return String(s || '').replace(/[^A-Za-z0-9._-]/g, '-').slice(0, 60) || 'ref';
