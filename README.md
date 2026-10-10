@@ -1,11 +1,20 @@
 # git-manager
 
-> 本地 Git 仓库的**可视化体检与维护中枢**，专为 vibe coding 项目设计。
+> 本地 Git 仓库的**可视化体检与维护中枢**，专为 vibe coding 项目设计。  
 > 苹果风 · 深色 · 极简 · 零依赖 · 只读优先 · 可接 GitHub。
 
 ---
 
 ## 快速开始
+
+**方式一：桌面版（推荐，双击即用）**
+
+下载 `GitManager-0.2.1-setup.exe` 安装，或直接用免安装的 `GitManager-0.2.1-portable.exe`。
+装好后双击启动，不需要命令行、不需要 `npm install`。
+
+> 桌面版会用到系统里的 `git`。如果没装，去 [git-scm.com](https://git-scm.com/download/win) 装一个即可。
+
+**方式二：Web 版（零依赖，适合改代码时用）**
 
 ```bash
 node server/index.js
@@ -16,18 +25,26 @@ node server/index.js
 
 指定端口：`node server/index.js --port 5000`
 
+**从源码跑桌面版 / 自己打包**
+
+```bash
+npm install                  # 只装 Electron 开发依赖，运行时依旧零依赖
+npm run desktop              # 开发态启动（与 Web 版共用 data/）
+npm run dist                 # 打包出安装程序与免安装版 → dist-desktop/
+```
+
 ---
 
 ## 它解决什么
 
 vibe coding 的项目往往**能跑但难维护**：临时分支堆积、WIP 提交、stash 越攒越多、不知道 AI 在哪儿动过手、远端仓库和本地对不上。git-manager 把这些问题变成一眼能看懂的画面：
 
-| 页面 | 回答的问题 |
-|---|---|
-| **概览** | 这个仓库现在健康吗？提交节奏如何？ |
-| **提交记录** | AI 参与了哪些提交？（多信号推断，每条给依据） |
-| **分支与引用** | 哪些分支该清理？能安全地切过去吗？ |
-| **操作日志** | 我（或 AI）对它做过什么？能撤销吗？ |
+| 页面         | 回答的问题                                               |
+| ---------- | --------------------------------------------------- |
+| **概览**     | 这个仓库现在健康吗？提交节奏如何？                                   |
+| **提交记录**   | AI 参与了哪些提交？（多信号推断，每条给依据）                            |
+| **分支与引用**  | 哪些分支该清理？能安全地切过去吗？                                   |
+| **操作日志**   | 我（或 AI）对它做过什么？能撤销吗？                                 |
 | **GitHub** | 远端有哪些仓库？能不改文件就读到内容吗？**能把本地仓库提交并推上去吗？** 能安全地改一行并提交吗？ |
 
 ---
@@ -43,9 +60,6 @@ vibe coding 的项目往往**能跑但难维护**：临时分支堆积、WIP 提
 ### 二、本地只读分析（默认，不改动任何东西）
 
 - 仓库概览：提交总数、分支数、体积、贡献者、时间跨度
-- **记住上次打开的仓库**：关闭前停留在哪个仓库，下次打开就回到哪个（服务端持久化，
-  浏览器换一个或清缓存都不影响）。若记住的仓库已被移除或目录已不存在，自动降级到
-  最后接入的仓库，不会卡在空状态。
 - 健康度评分（0–100）+ 可执行的问题清单
 - 12 周提交热力图
 - **AI 协作痕迹**（多信号推断，可解释、纯本地、不读文件内容）
@@ -58,11 +72,11 @@ vibe coding 的项目往往**能跑但难维护**：临时分支堆积、WIP 提
 
 它只读 **git 元数据**（提交信息、作者、时间、改动行数）与**文件路径名**，**不读文件内容、不联网、不上传**。据此分三类证据打分：
 
-| 证据类型 | 举例 | 说明 |
-|---|---|---|
+| 证据类型            | 举例                                                            | 说明       |
+| --------------- | ------------------------------------------------------------- | -------- |
 | **显式证据**（单条即定性） | `Co-Authored-By: Claude`、`🤖 Generated with ...`、机器人作者、AI 作者名 | 命中即「高置信」 |
-| **形态证据** | 正文结构化成文（标题+列表）、长正文、装饰字符、Conventional 前缀、超长标题 | 人类也可能这样写 |
-| **过程证据** | 与相邻提交间隔极短、单次改动量远超该仓库常态 | 依赖同仓库基线 |
+| **形态证据**        | 正文结构化成文（标题+列表）、长正文、装饰字符、Conventional 前缀、超长标题                  | 人类也可能这样写 |
+| **过程证据**        | 与相邻提交间隔极短、单次改动量远超该仓库常态                                        | 依赖同仓库基线  |
 
 **关键诚实约定：**
 
@@ -84,29 +98,26 @@ vibe coding 的项目往往**能跑但难维护**：临时分支堆积、WIP 提
 ### 四、GitHub 集成（Web 版新增）
 
 **读（只读）**
+
 - 账号身份条：头像、登录名、公开仓库数、当前 API 配额（含重置倒计时）
-  - 头像由服务端转成 **`data:` URL** 随 `/api/gh/status` 一起返回，**不需要任何额外请求**。
-    原因有两个：页面 CSP 是 `img-src 'self' data:`，外域头像会被直接拦掉；而且浏览器直连
-    `avatars.githubusercontent.com` 在国内也常年失败。走 `data:` 后与令牌、网络、CSP 全部无关。
-    另外保留了同源代理 `/api/gh/avatar`（HTTP 图片请求）作为备用路径，并带进程内缓存。
+  - 头像走**本机代理**（`/api/gh/avatar`）：页面 CSP 是 `img-src 'self'`，外域头像会被直接拦掉；而且浏览器直连 `avatars.githubusercontent.com` 在国内也常年失败。由服务端代取后回传，失败则回退到字形。
 - 仓库列表：搜索、公/私有过滤、按更新时间/星标/名称排序、分页
 - 单仓库详情：默认分支、语言、体积、最后推送时间
 - 文件树浏览 + 分支切换：目录逐层展开、文件内容只读预览、二进制文件自动识别并拒渲染
 
 **把本地仓库提交并推送（新增）**
+
 - 本地仓库视图顶栏与概览页都有「提交并推送」入口 —— 之前根本没有这个能力，用户只能跑命令行
 - 向导：状态检查 → 选目标（**新建 GitHub 仓库** 或 **推送到已有仓库**）→ 勾选要一并提交的改动 → 提交信息 → **输入仓库名二次确认** → 执行
-- **「本地仓库在 GitHub 上有没有对应」是怎么判断的**（两层，且如实标注置信度）：
-  1. **看 `origin`**：`git remote get-url origin` —— 但这只反映**本地 `.git/config` 里配了什么**。没配 origin 不代表 GitHub 上没有，origin 指向别的托管也不代表没有。
-  2. **按目录名去账号里找同名仓库**：拿本地目录名调 `GET /repos/{login}/{dirname}`。命中时界面明确写成「**疑似**已有对应」并说明依据是**名字匹配而非凭据级事实**，由用户确认，绝不自动决定推到哪。
 - 一次完成：`git add` → `git commit` → `remote add/set-url origin` → `git push -u origin <branch>`
 - 新建仓库时**不生成初始 README**，否则远端先有一个本地没有的提交，推送会因历史分叉被拒
 - 提交前自动打一个 `refs/gm/prepush/*` 快照，随时可回退
 - 仓库没配 git 提交身份时，用已连接的 GitHub 账号代署名（只写环境变量，不改任何配置文件）
 
 **写（需二次确认 + 乐观锁）**
+
 - 在线编辑任意文本文件（上限 1 MB），提交前先 dry-run 预演
-- 文件列表里每个文件行都有显式「编辑」按钮；右上角有「上传本地文件…」与「新建文件…」
+- 文件列表里每个文件行都有显式「编辑」按钮；右上角有「上传本地文件…」与「新建文件…」  
   —— 上传时由服务端在用户刚选完文件的瞬间读回内容（刻意不做成「给路径就读」的通用接口）
 - 提交前必须输入**仓库名**作为确认语（服务端校验 `confirm !== name` 即拒绝）
 - sha 乐观锁：预演时锁定远端 sha，提交时若不匹配则拒绝，防止覆盖别人的并发提交
@@ -114,12 +125,14 @@ vibe coding 的项目往往**能跑但难维护**：临时分支堆积、WIP 提
 - 所有远端写操作落审计日志，可在 GitHub 页查看
 
 **克隆**
+
 - 粘贴任意 GitHub 地址（HTTPS / `git@` / `owner/repo` 短写均可）→ 先解析预览 → 再执行
 - 可选目录层级、可选浅克隆深度、可选目标父目录（原生选择器）
 - 克隆完成后**自动接入**本系统并独立复核，重复克隆会被拦下
 - 地址白名单：只允许 `github.com`；`..` 路径穿越、非白名单主机一律拒绝
 
 **网络自检**
+
 - 一键探测 `api.github.com` / `github.com` / `codeload.github.com` 的 DNS 与 HTTPS 连通性
 - 以**真实 HTTPS 请求**为唯一判据（透明代理会假握手，只测 TCP 会误报"正常"）
 - 检测到代理环境时给出说明，而不是笼统报"离线"
@@ -152,10 +165,10 @@ vibe coding 的项目往往**能跑但难维护**：临时分支堆积、WIP 提
 
 **权限范围（scope）三档可选：**
 
-| 档位 | scope | 说明 |
-|---|---|---|
+| 档位 | scope                            | 说明                |
+| -- | -------------------------------- | ----------------- |
 | 只读 | `read:user public_repo read:org` | 只能读公开仓库，不会拿到任何写权限 |
-| 读写 | `read:user repo read:org` | 可读写私有仓库（含提交文件） |
+| 读写 | `read:user repo read:org`        | 可读写私有仓库（含提交文件）    |
 
 > 授权后如果你想撤销：<https://github.com/settings/applications>（页面上会给出这个链接）。
 
@@ -165,10 +178,10 @@ vibe coding 的项目往往**能跑但难维护**：临时分支堆积、WIP 提
 
 ### 凭据怎么存的
 
-| 环境 | 存储方式 |
-|---|---|
-| Windows | **DPAPI 加密**（`ProtectedData`，`CurrentUser` 作用域），密文落盘 |
-| 其他平台 / 显式降级 | 明文存储，但**页面上会明确标注安全等级**，不假装安全 |
+| 环境          | 存储方式                                                 |
+| ----------- | ---------------------------------------------------- |
+| Windows     | **DPAPI 加密**（`ProtectedData`，`CurrentUser` 作用域），密文落盘 |
+| 其他平台 / 显式降级 | 明文存储，但**页面上会明确标注安全等级**，不假装安全                         |
 
 - DPAPI 密钥绑定当前 Windows 账户，**别的账户或别的机器拿到文件也解不开**
 - 解密结果进程内缓存（DPAPI 单次开销约 800 ms，不缓存会拖垮每次请求）
@@ -202,11 +215,11 @@ vibe coding 的项目往往**能跑但难维护**：临时分支堆积、WIP 提
 
 `git push` 此前是整条熔断的。现在以**窄化白名单**方式开放，参数形态完全固定：
 
-| 子命令 | 允许的形态 | 结构性排除 |
-|---|---|---|
-| `push` | `git push [-u\|--set-upstream] origin <单一分支名>` | `--force` / `-f` / `+refspec` / `--mirror` / `--all` / `--tags` / `--delete` / `--prune` / 通配 refspec —— 因为 refspec 只允许单个分支名，这些形态**根本无法表达** |
-| `remote` | `remote`（列表）/ `remote -v` / `remote get-url origin` / `remote add\|set-url origin <url>` | `remote remove` / `rename` / 操作 origin 以外的远端名 |
-| `fetch` | `git fetch origin [branch]` | 非 origin、多余参数 |
+| 子命令      | 允许的形态                                                                                    | 结构性排除                                                                                                                                       |
+| -------- | ---------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| `push`   | `git push [-u\|--set-upstream] origin <单一分支名>`                                           | `--force` / `-f` / `+refspec` / `--mirror` / `--all` / `--tags` / `--delete` / `--prune` / 通配 refspec —— 因为 refspec 只允许单个分支名，这些形态**根本无法表达** |
+| `remote` | `remote`（列表）/ `remote -v` / `remote get-url origin` / `remote add\|set-url origin <url>` | `remote remove` / `rename` / 操作 origin 以外的远端名                                                                                               |
+| `fetch`  | `git fetch origin [branch]`                                                              | 非 origin、多余参数                                                                                                                               |
 
 - 远端地址必须是 `https://github.com/owner/name(.git)`；`..` 在**原始字符串**上校验（URL 解析器会先把它归一化掉，事后查 `pathname` 查不到），`http` / ssh / 非 github 主机一律拒绝
 - `git gc` / `clean` / `reset` / `checkout` / `rebase` / `merge` **仍然整条熔断**
@@ -238,11 +251,11 @@ vibe coding 的项目往往**能跑但难维护**：临时分支堆积、WIP 提
 
 本仓库自己就是第一个用户，分支约定如下：
 
-| 分支 / 标签 | 作用 | 状态 |
-|---|---|---|
-| `main` | 主线，持续演进 | 活跃 |
-| `pure-web` | **纯 Web 版**归档分支，只保留不依赖 Node 后端的静态实现 | 🔒 **已封存**，不再开发 |
-| `seal/pure-web-v0.1` | 封存点的标注 tag | 指向封存基线 |
+| 分支 / 标签              | 作用                                  | 状态              |
+| -------------------- | ----------------------------------- | --------------- |
+| `main`               | 主线，持续演进                             | 活跃              |
+| `pure-web`           | **纯 Web 版**归档分支，只保留不依赖 Node 后端的静态实现 | 🔒 **已封存**，不再开发 |
+| `seal/pure-web-v0.1` | 封存点的标注 tag                          | 指向封存基线          |
 
 **约定**：新功能一律先落在 `main`（Web 版），验证通过后再同步到 `pure-web`；`pure-web` 只接受同步，不接受独立开发。
 
@@ -273,81 +286,88 @@ server/                    本地服务（纯 Node，零依赖）
 web/                       前端（纯静态，无构建步骤）
   index.html
   css/app.css              设计系统（苹果风深色）
-  js/api.js                ★ 唯一传输边界 —— 迁移桌面端只改这一个文件
+  js/api.js                ★ 唯一传输边界 —— 桌面端只改了这一个文件里的两个方法
   js/util.js               格式化与徽章
   js/views.js              视图渲染（含 GitHub 未连接/已连接两态）
   js/palette.js            ⌘K 切换面板 + 安全切换流程 + GitHub 各对话框
   js/main.js               状态与路由
+desktop/                   桌面端壳（Electron）
+  main.js                  主进程：sidecar 启动 / 窗口 / 外链接管 / 原生对话框 / 自检
+  preload.cjs              唯一的桥（contextBridge）—— 不暴露 fs、不暴露任意 IPC
+  build/icon.ico           应用图标（由 scripts/make-icon.mjs 生成）
 scripts/                   验证脚本（node scripts/check-*.mjs）
+  make-icon.mjs            程序化生成图标（无外部依赖）
+  check-desktop.mjs        桌面端冒烟测试（真的把应用跑起来）
 docs/                      设计文档
 data/                      运行时缓存（仓库列表 + 操作日志 + 加密凭据）
+dist-desktop/              打包产物（gitignore，npm run dist 生成）
 ```
 
 ---
 
 ## API 一览
 
-所有 `/api/*` 需要请求头 `x-gm-token`（页面通过 `/gm-config.js` 自动获取）。
+所有 `/api/*` 需要请求头 `x-gm-token`（页面通过 `/gm-config.js` 自动获取）。  
 服务仅绑定 `127.0.0.1`，且不发送 CORS 头，杜绝跨站读取。
 
 ### 本地仓库
 
-| 方法 | 路径 | 说明 |
-|---|---|---|
-| GET | `/api/health` | 健康检查 |
-| GET | `/api/repos` | 已接入仓库列表（含 `lastRepoId` / `startupRepoId`） |
-| POST | `/api/repos/active` | 记住当前选中的仓库 `{ id }`，下次打开恢复 |
-| POST | `/api/repos/open` | 接入仓库 `{ path }` |
-| DELETE | `/api/repos/:id` | 从列表移除（不动磁盘） |
-| GET | `/api/repos/:id/overview` | 总览 |
-| GET | `/api/repos/:id/branches` | 分支列表（含风险） |
-| GET | `/api/repos/:id/commits?limit=` | 提交记录 |
-| GET | `/api/repos/:id/activity?weeks=` | 热力图数据 |
-| GET | `/api/repos/:id/health` | 健康度报告 |
-| GET | `/api/repos/:id/log` | 操作日志 |
-| POST | `/api/repos/:id/preflight` | 切换前检查 `{ target }` |
-| POST | `/api/repos/:id/switch` | 安全切换 `{ target, strategy, message }` |
-| POST | `/api/repos/:id/undo` | 撤销上一次切换 |
-| GET | `/api/repos/:id/publish-status` | 发布状态：分支/改动清单/origin/领先落后/提交身份；本地没绑 GitHub 时附带 `githubMatch`（按目录名找到的同名仓库，`?probe=0` 可关） |
-| POST | `/api/repos/:id/publish` | 提交并推送 `{ mode, repoName/owner+name, message, includeChanges, branch, confirm }` |
+| 方法     | 路径                               | 说明                                                                              |
+| ------ | -------------------------------- | ------------------------------------------------------------------------------- |
+| GET    | `/api/health`                    | 健康检查                                                                            |
+| GET    | `/api/repos`                     | 已接入仓库列表                                                                         |
+| POST   | `/api/repos/open`                | 接入仓库 `{ path }`                                                                 |
+| DELETE | `/api/repos/:id`                 | 从列表移除（不动磁盘）                                                                     |
+| GET    | `/api/repos/:id/overview`        | 总览                                                                              |
+| GET    | `/api/repos/:id/branches`        | 分支列表（含风险）                                                                       |
+| GET    | `/api/repos/:id/commits?limit=`  | 提交记录                                                                            |
+| GET    | `/api/repos/:id/activity?weeks=` | 热力图数据                                                                           |
+| GET    | `/api/repos/:id/health`          | 健康度报告                                                                           |
+| GET    | `/api/repos/:id/log`             | 操作日志                                                                            |
+| POST   | `/api/repos/:id/preflight`       | 切换前检查 `{ target }`                                                              |
+| POST   | `/api/repos/:id/switch`          | 安全切换 `{ target, strategy, message }`                                            |
+| POST   | `/api/repos/:id/undo`            | 撤销上一次切换                                                                         |
+| GET    | `/api/repos/:id/publish-status`  | 发布状态：分支/改动清单/origin/领先落后/提交身份                                                   |
+| POST   | `/api/repos/:id/publish`         | 提交并推送 `{ mode, repoName/owner+name, message, includeChanges, branch, confirm }` |
 
 ### 文件系统
 
-| 方法 | 路径 | 说明 |
-|---|---|---|
-| GET | `/api/fs/drives` | 可用驱动器列表 + 是否支持原生对话框 |
-| POST | `/api/fs/pick` | 弹出**原生文件夹选择器**，返回所选路径 |
-| POST | `/api/fs/pick-file` | 弹出**原生文件选择器**；`withContent` 时由服务端在选中瞬间读回内容（不做成通用读文件接口） |
-| POST | `/api/fs/probe` | 识别目录 `{ path }`：是否仓库 / 是否在仓库内 / 有无子仓库 |
-| POST | `/api/scan` | 启动只读扫描 `{ root, maxDepth }` → `{ job }` |
-| GET | `/api/scan/:id` | 轮询扫描进度与结果 |
-| POST | `/api/scan/:id/cancel` | 取消扫描 |
+| 方法   | 路径                     | 说明                                                     |
+| ---- | ---------------------- | ------------------------------------------------------ |
+| GET  | `/api/fs/drives`       | 可用驱动器列表 + 是否支持原生对话框                                    |
+| POST | `/api/fs/pick`         | 弹出**原生文件夹选择器**，返回所选路径                                  |
+| POST | `/api/fs/pick-file`    | 弹出**原生文件选择器**；`withContent` 时由服务端在选中瞬间读回内容（不做成通用读文件接口） |
+| POST | `/api/fs/probe`        | 识别目录 `{ path }`：是否仓库 / 是否在仓库内 / 有无子仓库                  |
+| POST | `/api/scan`            | 启动只读扫描 `{ root, maxDepth }` → `{ job }`                |
+| GET  | `/api/scan/:id`        | 轮询扫描进度与结果                                              |
+| POST | `/api/scan/:id/cancel` | 取消扫描                                                   |
+
 
 ### GitHub
 
-| 方法 | 路径 | 说明 |
-|---|---|---|
-| GET | `/api/gh/status` | 授权状态（**不含明文凭据**） |
-| POST | `/api/gh/client-id` | 保存 OAuth App 的 `client_id` |
-| DELETE | `/api/gh/client-id` | 清除 `client_id`（不动已授权 token） |
-| POST | `/api/gh/device/start` | 发起设备码授权 `{ scopeMode }` |
-| GET | `/api/gh/device/:id` | 轮询授权状态 |
-| POST | `/api/gh/device/:id/cancel` | 取消授权 |
-| POST | `/api/gh/pat` | 备选通道：存 PAT `{ token }` |
-| POST | `/api/gh/logout` | 登出并清除 token |
-| GET | `/api/gh/rate` | 当前 API 配额 |
-| GET | `/api/gh/repos` | 仓库列表 `?sort=&visibility=&q=&page=` |
-| GET | `/api/gh/repo` | 单仓库详情 `?owner=&name=` |
-| GET | `/api/gh/contents` | 文件/目录内容 `?owner=&name=&path=&ref=` |
-| POST | `/api/gh/preview` | 只读预演，返回远端当前 sha（乐观锁） |
-| POST | `/api/gh/commit` | 提交文件（需 `confirm` = 仓库名 + `sha` 匹配） |
-| POST | `/api/gh/delete` | 删除文件（同样需确认 + 乐观锁） |
-| GET | `/api/gh/log` | 远端写操作审计日志 |
-| POST | `/api/gh/parse` | 解析仓库地址（预览将要克隆什么） |
-| POST | `/api/gh/clone` | 克隆 `{ url, parentDir, dirName, depth }` |
-| POST | `/api/gh/create-repo` | 在 GitHub 新建**空仓库** `{ name, private, description }` |
-| GET | `/api/gh/avatar` | 头像代理 `?login=` 或 `?u=`（主机白名单，防 SSRF）；因 `<img>` 无法带请求头，仅此路由额外接受 `?t=<token>` |
-| GET | `/api/net/probe` | 探测 GitHub 各域名的 DNS + HTTPS 连通性 |
+| 方法     | 路径                          | 说明                                                                          |
+| ------ | --------------------------- | --------------------------------------------------------------------------- |
+| GET    | `/api/gh/status`            | 授权状态（**不含明文凭据**）                                                            |
+| POST   | `/api/gh/client-id`         | 保存 OAuth App 的 `client_id`                                                  |
+| DELETE | `/api/gh/client-id`         | 清除 `client_id`（不动已授权 token）                                                 |
+| POST   | `/api/gh/device/start`      | 发起设备码授权 `{ scopeMode }`                                                     |
+| GET    | `/api/gh/device/:id`        | 轮询授权状态                                                                      |
+| POST   | `/api/gh/device/:id/cancel` | 取消授权                                                                        |
+| POST   | `/api/gh/pat`               | 备选通道：存 PAT `{ token }`                                                      |
+| POST   | `/api/gh/logout`            | 登出并清除 token                                                                 |
+| GET    | `/api/gh/rate`              | 当前 API 配额                                                                   |
+| GET    | `/api/gh/repos`             | 仓库列表 `?sort=&visibility=&q=&page=`                                          |
+| GET    | `/api/gh/repo`              | 单仓库详情 `?owner=&name=`                                                       |
+| GET    | `/api/gh/contents`          | 文件/目录内容 `?owner=&name=&path=&ref=`                                          |
+| POST   | `/api/gh/preview`           | 只读预演，返回远端当前 sha（乐观锁）                                                        |
+| POST   | `/api/gh/commit`            | 提交文件（需 `confirm` = 仓库名 + `sha` 匹配）                                          |
+| POST   | `/api/gh/delete`            | 删除文件（同样需确认 + 乐观锁）                                                           |
+| GET    | `/api/gh/log`               | 远端写操作审计日志                                                                   |
+| POST   | `/api/gh/parse`             | 解析仓库地址（预览将要克隆什么）                                                            |
+| POST   | `/api/gh/clone`             | 克隆 `{ url, parentDir, dirName, depth }`                                     |
+| POST   | `/api/gh/create-repo`       | 在 GitHub 新建**空仓库** `{ name, private, description }`                         |
+| GET    | `/api/gh/avatar`            | 头像代理 `?login=` 或 `?u=`（主机白名单，防 SSRF）；因 `<img>` 无法带请求头，仅此路由额外接受 `?t=<token>` |
+| GET    | `/api/net/probe`            | 探测 GitHub 各域名的 DNS + HTTPS 连通性                                              |
 
 `:id` 用仓库 id；若要用绝对路径，需 `encodeURIComponent` 后再放进 URL。
 
@@ -357,18 +377,18 @@ data/                      运行时缓存（仓库列表 + 操作日志 + 加�
 
 「选择文件夹」和「磁盘扫描」是本系统里唯一会大规模接触你磁盘的操作，因此被刻意设计成**结构上不可能造成破坏**：
 
-| 承诺 | 落地方式 |
-|---|---|
-| 不写任何文件 | 扫描器只调用 `readdir` + `lstat` 两个系统调用，代码里没有任何写操作；缓存只写进本项目的 `data/` 目录 |
-| 不读文件内容 | 判断是否为仓库只看 `.git` **是否存在**，不解析其内容 |
-| 不跟随符号链接 | 跳过所有 symlink / 目录联接，杜绝死循环和「跑到盘外」 |
-| 不越界 | 每次入队都做路径包含性校验，结果严格落在所选根目录之内 |
-| 不会失控 | 三重硬上限：深度 ≤ 10、目录数 ≤ 40 万、时间 ≤ 5 分钟；可随时取消 |
-| 不碰系统区域 | 默认跳过 `Windows`、`Program Files`、`AppData`、`$RECYCLE.BIN` 等，以及 `node_modules` 等重量级缓存目录 |
-| 可验证 | 已实测：扫描前后被扫目录的**文件大小、修改时间、目录结构完全一致**，未新增任何文件 |
+| 承诺      | 落地方式                                                                                 |
+| ------- | ------------------------------------------------------------------------------------ |
+| 不写任何文件  | 扫描器只调用 `readdir` + `lstat` 两个系统调用，代码里没有任何写操作；缓存只写进本项目的 `data/` 目录                    |
+| 不读文件内容  | 判断是否为仓库只看 `.git` **是否存在**，不解析其内容                                                     |
+| 不跟随符号链接 | 跳过所有 symlink / 目录联接，杜绝死循环和「跑到盘外」                                                     |
+| 不越界     | 每次入队都做路径包含性校验，结果严格落在所选根目录之内                                                          |
+| 不会失控    | 三重硬上限：深度 ≤ 10、目录数 ≤ 40 万、时间 ≤ 5 分钟；可随时取消                                             |
+| 不碰系统区域  | 默认跳过 `Windows`、`Program Files`、`AppData`、`$RECYCLE.BIN` 等，以及 `node_modules` 等重量级缓存目录 |
+| 可验证     | 已实测：扫描前后被扫目录的**文件大小、修改时间、目录结构完全一致**，未新增任何文件                                          |
 
-> 会改动仓库的路径只有三条：**本地分支切换**、**本地提交并推送**、**GitHub 远端提交**。
-> 三者都要经过「预演/检查 → 快照/乐观锁 → 二次确认 → 审计日志」这一整套闸门。
+> 会改动仓库的路径只有三条：**本地分支切换**、**本地提交并推送**、**GitHub 远端提交**。  
+> 三者都要经过「预演/检查 → 快照/乐观锁 → 二次确认 → 审计日志」这一整套闸门。  
 > 前者必须经过 Preflight + 快照 + 日志，后者必须经过预演 + 确认 + 乐观锁 + 审计日志。
 
 ---
@@ -386,17 +406,63 @@ node scripts/check-ui.mjs            # 前端模块加载与渲染函数
 node scripts/check-dpapi.mjs         # 凭据仓库端到端：DPAPI 加密 / 跨进程冷启动解密 / 空值边界
 node scripts/check-net.mjs           # 网络自检判据
 node scripts/check-dialog.mjs        # 原生对话框桥
+node scripts/check-desktop.mjs       # 桌面端：真的把 Electron 应用跑起来自检（14 项）
+node scripts/check-desktop.mjs --app dist-desktop/win-unpacked   # 自检**打包产物**
 ```
 
-> `check-clone-e2e.mjs` 需要可访问 `github.com`，无网络时设 `GM_TEST_NET=1` 才执行真实克隆。
+> `check-clone-e2e.mjs` 需要可访问 `github.com`，无网络时设 `GM_TEST_NET=1` 才执行真实克隆。  
 > `check-scan.mjs` 是**探索性脚本**而非自包含测试：需先自己起一个 `node server/index.js --port 4630`，并把夹具目录与真实仓库路径作为参数传入。
+
+**为什么要有 `check-desktop.mjs`**：桌面端的失败模式几乎都看不见 —— sidecar 起来了但窗口连不上、
+preload 没注入、令牌没传对、渲染层 JS 报错导致白屏。静态检查一个都发现不了，必须真的把它跑起来。
+它会启动应用、逐项断言、打印结果后退出，并且**把数据指向临时目录**，不碰真实的 `data/store.json`。
 
 ---
 
-## 迁移到桌面端
+## 桌面版
 
-前端是**纯静态资源**，后端核心是**纯 Node 且与 HTTP 无关**，所以换壳不需要重写业务代码。
-详见 [`docs/03-迁移契约与桌面端.md`](docs/03-迁移契约与桌面端.md)。
+已经打包成 Windows 应用，**Web 版与桌面版共用同一套后端与前端**（`server/` 与 `web/` 一行都没改）。
+
+### 怎么搭起来的
+
+```
+GitManager.exe（Electron 主进程 · desktop/main.js）
+   │
+   ├─ 用 ELECTRON_RUN_AS_NODE 把 server/index.js 拉成 sidecar 子进程
+   │     └─ 端口传 --port 0，由系统分配；真实端口与令牌从 stdout 的 GM_READY 行读回
+   │
+   └─ 窗口加载 http://127.0.0.1:<随机端口>/
+         └─ 页面照常走 HTTP + 令牌，前端零改动
+```
+
+几个刻意的选择：
+
+| 决定 | 原因 |
+|---|---|
+| **sidecar 用 Electron 自带的 Node 跑**（`ELECTRON_RUN_AS_NODE=1`） | Electron 二进制本身就是 Node 运行时，不必再打一份进去，省约 40MB |
+| **窗口加载 127.0.0.1 而不是 `file://`** | CSP、相对路径、fetch 全部照常工作，`web/**` 零改动；`file://` 下还得逐条放宽 CSP |
+| **保留令牌机制** | 挡不住同源的注入脚本，但能挡住**其它本机进程**随意驱动 git 写操作 —— 这不因换了壳而失效 |
+| **端口用 0** | 用户可能同时开着 Web 版（4599），写死端口会直接起不来 |
+| **`asar: false`** | sidecar 要由 Node 从磁盘执行脚本，asar 打包后路径不可执行。代价是代码可读，对一个本地工具反而是透明性 |
+| **数据放用户目录** | 安装目录可能只读，升级覆盖时会连用户数据一起抹掉 |
+
+### 数据放哪
+
+| 场景 | 目录 |
+|---|---|
+| 安装版 / 免安装版 | `%APPDATA%\GitManager\`（仓库列表、操作日志、加密凭据） |
+| 开发态 `npm run desktop` | 项目里的 `data/`，与 Web 版**共用**，所以两边看到同一批仓库 |
+| 自己指定 | 设环境变量 `GM_DATA_DIR` 即可覆盖（自检脚本就用它做隔离） |
+
+菜单里「文件 → 打开数据目录」可以直接跳过去。
+
+### 与 Web 版的两处差异
+
+只有一处代码不同：`web/js/api.js` 里的 `pickFolder` / `pickFile` 在桌面端改走 **Electron 原生对话框**，
+其余全部请求照旧走 HTTP。原生对话框返回结构与服务端的 PowerShell 版本完全一致
+（`{ok, cancelled, path}`），所以上层调用方不需要知道自己在哪个宿主里。
+
+另外桌面端会自动接管外链（OAuth 设备码地址、仓库链接等），交给系统浏览器打开。
 
 ---
 

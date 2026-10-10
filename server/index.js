@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { handleApi, errorPayload } from './api.js';
 import { gitVersion } from './core/git.js';
 import { VERSION } from './core/util.js';
+import { DATA_DIR } from './core/store.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -13,8 +14,10 @@ const WEB_DIR = path.join(ROOT, 'web');
 
 const argv = process.argv.slice(2);
 const portArg = argv.indexOf('--port');
+// --port 0 = 让操作系统挑一个空闲端口。桌面端用它避免与用户已开着的实例抢 4599。
 const PORT = Number(portArg >= 0 ? argv[portArg + 1] : process.env.GM_PORT || 4599);
 const HOST = '127.0.0.1'; // 只绑定本机回环，不对外暴露
+const QUIET = argv.includes('--quiet'); // 桌面端由主进程接管日志，不需要 banner
 
 // 本机会话令牌：防止其它本机进程/恶意网页随意驱动 git 写操作
 const TOKEN = crypto.randomBytes(24).toString('hex');
@@ -98,21 +101,32 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, HOST, async () => {
+  // --port 0 时真实端口由操作系统分配，必须从 address() 取回来
+  const actualPort = server.address().port;
+  const url = `http://${HOST}:${actualPort}/`;
   const gv = await gitVersion();
-  const url = `http://${HOST}:${PORT}/`;
+
+  // 机器可读的一行：桌面端（Electron）据此拿到端口与令牌去开窗口。
+  // 打印到 stdout 而不是写文件 —— 不落盘就没有「令牌留在磁盘上」这个泄漏面。
+  process.stdout.write(
+    `GM_READY ${JSON.stringify({ port: actualPort, token: TOKEN, version: VERSION, host: HOST })}\n`
+  );
+
+  if (QUIET) return;
+
   console.log('');
   console.log('  git-manager · 本地 Git 体检与维护中枢');
   console.log('  ─────────────────────────────────────────');
   console.log(`  运行中    ${url}`);
-  console.log(`  服务地址  ${HOST}:${PORT}（仅本机可访问）`);
+  console.log(`  服务地址  ${HOST}:${actualPort}（仅本机可访问）`);
   console.log(`  git 版本  ${gv || '未检测到 git，请确认已加入 PATH'}`);
-  console.log(`  缓存目录  ${path.join(ROOT, 'data')}`);
+  console.log(`  缓存目录  ${DATA_DIR}`);
   console.log('');
 });
 
 server.on('error', (e) => {
   if (e.code === 'EADDRINUSE') {
-    console.error(`端口 ${PORT} 已被占用，请用 --port 指定其它端口。`);
+    console.error(`端口 ${PORT} 已被占用，请用 --port 指定其它端口（或用 --port 0 自动分配）。`);
     process.exit(1);
   }
   throw e;

@@ -1,14 +1,78 @@
 {
   "name": "git-manager",
   "version": "0.2.1",
+  "productName": "GitManager",
   "private": true,
+  "author": "GitManager",
   "type": "module",
-  "description": "本地 Git 仓库可视化体检与维护中枢（vibe coding 专用）。零依赖 Node 服务 + 纯静态前端，可直接迁移到 Tauri / Electron。",
+  "main": "desktop/main.js",
+  "description": "本地 Git 仓库可视化体检与维护中枢（vibe coding 专用）。零依赖 Node 服务 + 纯静态前端，Web 版与桌面版共用同一套 core。",
   "scripts": {
     "start": "node server/index.js",
-    "dev": "node server/index.js --port 4599"
+    "dev": "node server/index.js --port 4599",
+    "desktop": "electron .",
+    "icon": "node scripts/make-icon.mjs",
+    "dist": "node scripts/make-icon.mjs && electron-builder --win",
+    "dist:dir": "node scripts/make-icon.mjs && electron-builder --win --dir"
   },
   "engines": {
     "node": ">=18"
+  },
+  "build": {
+    "appId": "com.gitmanager.desktop",
+    "productName": "GitManager",
+    "copyright": "Copyright © 2026",
+    "asar": false,
+    "directories": {
+      "output": "dist-desktop",
+      "buildResources": "desktop/build"
+    },
+    "files": [
+      "desktop/**/*",
+      "server/**/*",
+      "web/**/*",
+      "package.json",
+      "!**/*.map"
+    ],
+    "_note_electronLanguages": "裁掉多余语言可省约 13MB（locales 默认 55 种共 49MB）。这里**刻意不启用**：该步骤会一次性删除 50+ 个文件，在有批量删除保护的环境里会直接让打包失败。要启用就自己加 \"electronLanguages\": [\"zh-CN\",\"en-US\"]。",
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "desktop/build/icon.ico",
+      "artifactName": "${productName}-${version}-setup.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "GitManager",
+      "deleteAppDataOnUninstall": false,
+      "installerLanguages": [
+        "zh_CN",
+        "en_US"
+      ],
+      "language": "2052"
+    },
+    "portable": {
+      "artifactName": "${productName}-${version}-portable.${ext}"
+    }
+  },
+  "devDependencies": {
+    "electron": "^44.7.0",
+    "electron-builder": "^26.15.3"
   }
 }

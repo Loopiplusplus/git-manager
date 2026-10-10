@@ -3,3 +3,8 @@ data/
 node_modules/
 *.log
 .DS_Store
+
+# 桌面端打包产物
+dist-desktop/
+dist-new-trash/
+obsolete-*/
