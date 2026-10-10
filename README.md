@@ -3,39 +3,47 @@
 > 本地 Git 仓库的**可视化体检与维护中枢**，专为 vibe coding 项目设计。  
 > 苹果风 · 深色 · 极简 · 零依赖 · 只读优先 · 可接 GitHub。
 
+**目录**：[快速开始](#快速开始) · [它解决什么](#它解决什么) · [已实现](#已实现) · [连接 GitHub](#连接-github两条通道) · [安全模型](#安全模型重要) · [分支策略](#分支策略) · [目录结构](#目录结构) · [API 一览](#api-一览) · [只读承诺](#只读承诺) · [验证](#验证) · [桌面版](#桌面版) · [文档](#文档) · [已知限制](#已知限制)
+
 ---
 
 ## 快速开始
 
-**方式一：桌面版（推荐，双击即用）**
+**环境要求**：Node ≥ 18 + 系统里已装 `git`。跑起来**零依赖**——不需要 `npm install`。
 
-下载 `GitManager-0.2.2-setup.exe` 安装，或直接用免安装的 `GitManager-0.2.2-portable.exe`。
-装好后双击启动，不需要命令行、不需要 `npm install`。
-
-> 当前 `dist-desktop/` 里已经打好的安装包是 **0.2.1**；0.2.2（分支增删 + 盘根扫描修复）需要重新跑一次 `npm run dist`。
-> 因为本机有「批量删除守卫」（一次删超 50 个文件会被拦下），electron-builder 清理旧 `win-unpacked` 会失败 ——
-> **一个输出目录只能用一次**，重新打包请先改 `build.directories.output` 或手动清空 `dist-desktop/`。
-
-> 桌面版会用到系统里的 `git`。如果没装，去 [git-scm.com](https://git-scm.com/download/win) 装一个即可。
-
-**方式二：Web 版（零依赖，适合改代码时用）**
+### 方式一：Web 版（最快）
 
 ```bash
 node server/index.js
 # 打开 http://127.0.0.1:4599
 ```
 
-无需 `npm install`（后端零依赖），Node ≥ 18，本地已安装 `git`。
+- 指定端口：`node server/index.js --port 5000`
+- 自动分配空闲端口：`node server/index.js --port 0`
+- 服务只绑定 `127.0.0.1`，不对外暴露
 
-指定端口：`node server/index.js --port 5000`
-
-**从源码跑桌面版 / 自己打包**
+### 方式二：桌面版（Electron 壳，双击即用）
 
 ```bash
-npm install                  # 只装 Electron 开发依赖，运行时依旧零依赖
-npm run desktop              # 开发态启动（与 Web 版共用 data/）
-npm run dist                 # 打包出安装程序与免安装版 → dist-desktop/
+npm install          # 只装 Electron 开发依赖；运行时依旧零依赖
+npm run desktop      # 开发态直接启动
+npm run dist         # 打包出安装程序 + 免安装版 → dist-desktop/
 ```
+
+桌面版本质是**同一套代码**：主进程用 Electron 二进制以纯 Node 方式拉起同一个本地服务，
+窗口加载 `127.0.0.1:<随机端口>`。所以 `server/` 与 `web/` 一行都没为它改过 —— 详见 [`docs/03`](docs/03-迁移契约与桌面端.md)。
+
+> 安装包是**本地构建产物**，不在仓库里（`dist-desktop/` 已 gitignore）。想用桌面版就自己跑一次 `npm run dist`。
+
+### 数据落在哪
+
+| 场景 | 目录 |
+|---|---|
+| Web 版 / 开发态桌面版 | 项目下的 `data/` |
+| 打包后的桌面版 | 系统的 `userData` 目录（绝不写安装目录） |
+| 任意场景覆盖 | 环境变量 `GM_DATA_DIR=/some/path` |
+
+里面存的是仓库列表、操作日志、加密凭据 —— 全部**只在本机**，已在 `.gitignore` 里排除。
 
 ---
 
@@ -292,40 +300,53 @@ server/                    本地服务（纯 Node，零依赖）
   index.js                 HTTP 入口：本机令牌鉴权 + 静态托管
   api.js                   路由 → 参数解析（不含业务逻辑）
   core/
-    git.js                 git 引擎：命令白名单 + 危险 flag 熔断 + push/remote 窄化校验
+    git.js                 ★ git 引擎：命令白名单 + 危险 flag 熔断 + 窄化校验（push/remote/fetch/branch/update-ref）
     repo.js                仓库中途接入（零侵入探测）
     analyzer.js            分析器：概览/分支/提交/热力图/健康度
     ai-signals.js          ★ AI 协作痕迹检测器（多信号 + 可解释 + 纯本地）
-    safety.js              安全模块：Preflight / 快照式切换 / 撤销 / 日志
+    safety.js              安全模块：Preflight / 快照式切换 / 分支增删恢复 / 撤销 / 日志
     dialog.js              原生文件夹/文件选择器（PowerShell 桥）
     scanner.js             只读磁盘扫描（readdir + lstat）
     secrets.js             ★ 凭据仓库：DPAPI 加密落盘 + 进程内缓存
     auth.js                ★ OAuth Device Flow + PAT + 登出
     github.js              ★ REST 客户端 + 写操作验证层（预演/乐观锁/提交/删除）+ 建仓 + 头像代理
-    publish.js             ★ 本地仓库「提交并推送」（唯一会改本地提交历史的路径）
+    publish.js             ★ 本地仓库「提交并推送」
     clone.js               ★ 克隆 + URL 白名单 + 凭据环境注入
     netcheck.js            ★ 网络自检（真实 HTTPS 为唯一判据）
     store.js               本地存储（接口可换 SQLite）
-    util.js                工具函数
+    util.js                工具函数 + 版本号单一来源
 web/                       前端（纯静态，无构建步骤）
   index.html
   css/app.css              设计系统（苹果风深色）
   js/api.js                ★ 唯一传输边界 —— 桌面端只改了这一个文件里的两个方法
   js/util.js               格式化与徽章
-  js/views.js              视图渲染（含 GitHub 未连接/已连接两态）
-  js/palette.js            ⌘K 切换面板 + 安全切换流程 + GitHub 各对话框
+  js/views.js              视图渲染（概览/提交/分支/日志/GitHub）
+  js/palette.js            ⌘K 切换面板 + 安全切换 + 分支增删 + GitHub 各对话框
   js/main.js               状态与路由
 desktop/                   桌面端壳（Electron）
   main.js                  主进程：sidecar 启动 / 窗口 / 外链接管 / 原生对话框 / 自检
   preload.cjs              唯一的桥（contextBridge）—— 不暴露 fs、不暴露任意 IPC
   build/icon.ico           应用图标（由 scripts/make-icon.mjs 生成）
-scripts/                   验证脚本（node scripts/check-*.mjs）
-  make-icon.mjs            程序化生成图标（无外部依赖）
+scripts/                   验证脚本（node scripts/check-*.mjs，全部自包含）
+  check-branch.mjs         分支增删 + 盘根扫描边界 + 接线契约
   check-desktop.mjs        桌面端冒烟测试（真的把应用跑起来）
-docs/                      设计文档
-data/                      运行时缓存（仓库列表 + 操作日志 + 加密凭据）
-dist-desktop/              打包产物（gitignore，npm run dist 生成）
+  make-icon.mjs            程序化生成图标（无外部依赖）
+docs/                      设计文档（见文末「文档」）
 ```
+
+### 不在仓库里的东西
+
+下面这些是**本机专属**的，已在 `.gitignore` 里排除，克隆下来不会有：
+
+| 路径 | 是什么 | 为什么不入库 |
+|---|---|---|
+| `data/` | 仓库列表、操作日志、加密凭据 | 里面是**你自己的仓库绝对路径** |
+| `.workbuddy/` | 开发过程中的工作记忆 | 记录了本机路径与本机专属的上下文 |
+| `node_modules/` | 依赖 | 跑 `npm install` 即可 |
+| `dist-desktop/`、`dist-*/` | 打包产物 | 跑 `npm run dist` 即可 |
+| `*.log`、`.DS_Store`、`.vscode/` | 编辑器/系统垃圾 | —— |
+
+> 换句话说：**仓库里只有项目本身的代码与文档**，跑起来后产生的数据一律落在本机、不进仓库。
 
 ---
 
@@ -498,8 +519,33 @@ GitManager.exe（Electron 主进程 · desktop/main.js）
 
 ## 文档
 
-- [`docs/00-产品构想与技术方案.md`](docs/00-产品构想与技术方案.md)
-- [`docs/01-前端视觉提示词-Google图像生成.md`](docs/01-前端视觉提示词-Google图像生成.md)
-- [`docs/02-分支切换与安全模型.md`](docs/02-分支切换与安全模型.md)
-- [`docs/03-迁移契约与桌面端.md`](docs/03-迁移契约与桌面端.md)
-- [`docs/04-GitHub集成与OAuth授权.md`](docs/04-GitHub集成与OAuth授权.md)
+| 文档 | 内容 |
+|---|---|
+| [`docs/00-产品构想与技术方案.md`](docs/00-产品构想与技术方案.md) | 这个工具为什么长这样：问题定义、信息架构、技术选型 |
+| [`docs/01-前端视觉提示词-Google图像生成.md`](docs/01-前端视觉提示词-Google图像生成.md) | 苹果风设计系统的视觉规格与生成提示词 |
+| [`docs/02-分支切换与安全模型.md`](docs/02-分支切换与安全模型.md) | ★ 三级安全模型、Preflight 清单、窄化白名单、分支增删、只读扫描保证 |
+| [`docs/03-迁移契约与桌面端.md`](docs/03-迁移契约与桌面端.md) | 三层边界与迁移契约：Web → 桌面为什么只改一个文件 |
+| [`docs/04-GitHub集成与OAuth授权.md`](docs/04-GitHub集成与OAuth授权.md) | OAuth 设备码流程、凭据存储、写操作的三步验证、头像与 CSP |
+
+---
+
+## 已知限制
+
+诚实列一下现在做不了 / 做得不完美的地方：
+
+| 限制 | 说明 |
+|---|---|
+| **只写本地，不碰远端历史** | 不提供 rebase / merge / reset / cherry-pick / force push。这些一律在引擎层熔断，宁可不做 |
+| **不做 GitHub 侧的分支删除 / PR** | 远端文件提交与建仓已支持；远端分支管理、PR、Issue 尚未接入 |
+| **AI 痕迹是推断，不是判定** | 启发式打分，**没检出 ≠ 没有 AI 参与**。只有显式证据（如 `Co-Authored-By`）才给「高置信」 |
+| **扫描会跳过系统区域** | `Windows`、`Program Files`、`AppData`、`node_modules` 等默认不进入，所以那里面的仓库扫不到 |
+| **快照不会自动清理** | `refs/gm/snapshots/*`、`refs/gm/deleted/*` 会一直留着。它们是纯本地 ref，想清理用 `git update-ref -d <ref>` |
+| **只测过 Windows** | 原生对话框走 PowerShell + WinForms；扫描与 DPAPI 都按 Windows 写的。macOS / Linux 未验证 |
+| **前端 CSS 未做自动化验证** | 视图层是纯函数、有渲染冒烟测试，但布局只能靠人眼 |
+
+---
+
+## 许可
+
+本项目为个人项目，未附许可协议。如需引用或复用请先开 Issue 说明用途。
+

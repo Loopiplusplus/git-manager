@@ -206,7 +206,15 @@ console.log('\n[9] 真实仓库端到端（用本仓库自身当样本）');
 
   check('解析到本仓库的提交', records.length >= 5, String(records.length));
   check('★ 不再把「全是 AI 写的仓库」报成 0%', sum.flagged > 0, `flagged=${sum.flagged}`);
-  check('检出本仓库的 AI 工具痕迹（.workbuddy）', sum.agentFiles.some((a) => a.tool === 'WorkBuddy'));
+  // 本仓库已把 .workbuddy/ 移出跟踪（它记录的是本机路径，只对本机有效、不进仓库），
+  // 所以这里不能再断言「检出 .workbuddy」。改成正向有用的那条：**仓库卫生守卫** ——
+  // 一旦有人把 .workbuddy / CLAUDE.md / .cursorrules 这类本机专属文件又提交进来，这里会红。
+  check(
+    '仓库里没有混入本机专属的 AI 痕迹文件（.workbuddy / CLAUDE.md / .cursorrules 等）',
+    sum.agentFiles.length === 0,
+    JSON.stringify(sum.agentFiles),
+  );
+  check('工具痕迹检测本身有效（用合成输入验）', S.detectAgentFiles(['.workbuddy/memory/x.md', 'CLAUDE.md', 'src/a.js']).length === 2);
   check('信号明细非空（能解释是靠什么判的）', sum.signals.length > 0);
   check('每条判定都带可读依据', analyzed.some((a) => a.signals.every((s) => s.detail && s.detail.length > 0)));
   check('未被显式证据污染的样本不会冒充高置信', analyzed.every((a) => a.level !== 'high' || a.basis === 'explicit'));
