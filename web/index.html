@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:;">
+<title>git-manager · 本地 Git 体检与维护中枢</title>
+<link rel="stylesheet" href="/css/app.css">
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true"></span>
+      <span class="brand-name">git-manager</span>
+    </div>
+    <nav class="nav" id="nav"></nav>
+    <div class="sidebar-foot">
+      <button class="nav-btn nav-btn-accent" id="btn-switch" type="button">
+        <span class="nav-ico">⑂</span><span>切换分支</span><kbd>⌘K</kbd>
+      </button>
+    </div>
+  </aside>
+
+  <main class="main">
+    <header class="topbar">
+      <div class="topbar-main">
+        <h1 class="repo-name" id="repo-name">未接入仓库</h1>
+        <p class="repo-sub" id="repo-sub">接入一个本地 Git 仓库后开始体检</p>
+      </div>
+      <div class="topbar-actions">
+        <button class="chip-btn" id="btn-undo" type="button" hidden>撤销上一次</button>
+        <button class="chip-btn" id="btn-refresh" type="button">刷新</button>
+        <button class="chip-btn chip-btn-strong" id="btn-repos" type="button">仓库</button>
+      </div>
+    </header>
+    <section class="view" id="view"></section>
+  </main>
+</div>
+
+<div class="overlay" id="overlay" hidden></div>
+<div class="toasts" id="toasts"></div>
+
+<script src="/gm-config.js"></script>
+<script type="module" src="/js/main.js"></script>
+</body>
+</html>

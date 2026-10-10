@@ -1,0 +1,5 @@
+# 运行时数据（仓库列表 + 操作日志），不入库
+data/
+node_modules/
+*.log
+.DS_Store
