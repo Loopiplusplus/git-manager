@@ -1,5 +1,6 @@
 import { api } from './api.js';
-import { $, esc, toast, branchBadges } from './util.js';
+import { $, esc, toast, branchBadges, relTime, fmtDay } from './util.js';
+import { humanSize, netBanner } from './views.js';
 
 let dispose = null;
 
@@ -720,3 +721,700 @@ export async function openScanModal(ctx, preset = {}) {
   }
 }
 
+
+/* ============================================================
+   GitHub · 授权（OAuth 设备码流程）
+   ============================================================ */
+
+let ghTimer = null;
+let ghSession = null;
+
+function stopGhPoll() {
+  if (ghTimer) { clearTimeout(ghTimer); ghTimer = null; }
+  const id = ghSession;
+  ghSession = null;
+  if (id) api.ghDeviceCancel(id).catch(() => {});
+}
+
+function ghStepList() {
+  return [
+    ['1', '打开验证页面', '在浏览器里打开 GitHub 的授权页'],
+    ['2', '输入下面的设备码', '设备码会把这次授权绑定到本机'],
+    ['3', '确认授权', '回来后这里会自动完成'],
+  ];
+}
+
+export async function openGithubAuthorize(ctx) {
+  stopGhPoll();
+  const scopeMode = ctx.state.ghScope || 'write';
+
+  mount(`<div class="modal">
+    <div class="modal-head"><h3 class="modal-title">正在向 GitHub 申请设备码…</h3></div>
+    <div class="modal-body"><div class="loading"><span class="spinner"></span><span>连接 github.com</span></div></div>
+  </div>`);
+
+  let s;
+  try {
+    s = await api.ghDeviceStart(scopeMode);
+  } catch (e) {
+    mount(`<div class="modal">
+      <div class="modal-head">
+        <h3 class="modal-title">无法开始授权</h3>
+        <p class="modal-sub">${esc(e.message)}</p>
+      </div>
+      <div class="modal-body">
+        <div class="note note-err">${esc(e.message)}</div>
+        ${e.data?.code === 'NETWORK' || /连不上|无法连接/.test(e.message)
+          ? '<p class="tiny muted">这一般是网络问题：设备码授权需要访问 <span class="mono">github.com</span>，而读取仓库走的是 <span class="mono">api.github.com</span>，两者可能被区别对待。</p>'
+          : ''}
+      </div>
+      <div class="modal-foot"><button class="btn" data-act="cancel">关闭</button></div>
+    </div>`);
+    $('#overlay').querySelector('[data-act="cancel"]').addEventListener('click', closeOverlay);
+    return;
+  }
+
+  ghSession = s.id;
+
+  const paint = (st) => {
+    const done = st.status === 'ok';
+    const dead = st.status === 'denied' || st.status === 'expired' || st.status === 'error';
+    const steps = ghStepList()
+      .map(
+        ([n, title, sub], i) => {
+          const active = !done && !dead && i === (st.status === 'pending' ? currentStep : 2);
+          return `<div class="gh-step${active ? ' on' : ''}">
+            <span class="gh-step-n">${done ? '✓' : n}</span>
+            <div><div>${esc(title)}</div><div class="tiny muted">${esc(sub)}</div></div>
+          </div>`;
+        },
+      )
+      .join('');
+
+    return `<div class="modal">
+      <div class="modal-head">
+        <h3 class="modal-title">${done ? '授权成功' : '在 GitHub 上完成授权'}</h3>
+        <p class="modal-sub">
+          ${done
+            ? `已连接为 @${esc(st.viewer?.login || '')}`
+            : dead
+              ? '本次授权没有完成'
+              : '本页面会自动检测，你不需要手动刷新'}
+        </p>
+      </div>
+      <div class="modal-body">
+        ${done
+          ? `<div class="note note-ok">
+               <div>授权完成，token 已加密保存到本机。</div>
+               <div class="tiny muted" style="margin-top:6px">
+                 授权范围：<span class="mono">${esc((st.viewer?.scopes || []).join(', ') || st.scopes)}</span>
+               </div>
+             </div>`
+          : dead
+            ? `<div class="note note-err">${esc(st.error || '授权未完成')}</div>`
+            : `<div class="gh-code" id="gh-code">${esc(st.userCode)}</div>
+               <div class="row" style="gap:8px;justify-content:center;margin:10px 0 18px">
+                 <button class="btn" data-act="copy">复制设备码</button>
+                 <button class="btn btn-primary" data-act="open">打开验证页面</button>
+               </div>
+               <div class="gh-steps">${steps}</div>
+               <p class="tiny muted" style="margin-top:14px;text-align:center">
+                 剩余有效时间 ${Math.floor((st.expiresIn || 0) / 60)} 分 ${(st.expiresIn || 0) % 60} 秒 ·
+                 授权范围 <span class="mono">${esc(st.scopes)}</span>
+               </p>`}
+      </div>
+      <div class="modal-foot">
+        <button class="btn" data-act="cancel">${done ? '完成' : '取消'}</button>
+      </div>
+    </div>`;
+  };
+
+  let currentStep = 0;
+
+  const tick = async () => {
+    if (!ghSession) return;
+    let st;
+    try {
+      st = await api.ghDevicePoll(ghSession);
+    } catch (e) {
+      mount(`<div class="modal"><div class="modal-head"><h3 class="modal-title">授权中断</h3></div><div class="modal-body"><div class="note note-err">${esc(e.message)}</div></div><div class="modal-foot"><button class="btn" data-act="cancel">关闭</button></div></div>`);
+      $('#overlay').querySelector('[data-act="cancel"]').addEventListener('click', closeOverlay);
+      return;
+    }
+    if (!ghSession) return;
+
+    currentStep = st.status === 'pending' ? Math.min(currentStep + 1, 2) : currentStep;
+    const o = mount(paint(st));
+    o.querySelector('[data-act="cancel"]').addEventListener('click', () => {
+      if (st.status === 'ok') { stopGhPoll(); closeOverlay(); ctx.refresh?.(); return; }
+      const id = ghSession;
+      stopGhPoll();
+      closeOverlay();
+      if (id) api.ghDeviceCancel(id).catch(() => {});
+    });
+    const copyBtn = o.querySelector('[data-act="copy"]');
+    if (copyBtn) copyBtn.addEventListener('click', async () => {
+      try { await navigator.clipboard.writeText(st.userCode); toast('设备码已复制', 'ok'); }
+      catch { toast('复制失败，请手动选中', 'err'); }
+    });
+    const openBtn = o.querySelector('[data-act="open"]');
+    if (openBtn) openBtn.addEventListener('click', () => window.open(st.verificationUri, '_blank', 'noopener'));
+
+    if (st.status === 'ok') {
+      ghSession = null;
+      if (ghTimer) { clearTimeout(ghTimer); ghTimer = null; }
+      toast(`已连接 GitHub：@${st.viewer?.login || ''}`, 'ok');
+      ctx.refresh?.();
+      return;
+    }
+    if (st.status === 'denied' || st.status === 'expired' || st.status === 'error') {
+      ghSession = null;
+      return;
+    }
+    ghTimer = setTimeout(tick, Math.max(1, st.interval || 5) * 1000);
+  };
+
+  const first = mount(paint(s));
+  first.querySelector('[data-act="cancel"]').addEventListener('click', () => {
+    stopGhPoll();
+    closeOverlay();
+  });
+  first.querySelector('[data-act="copy"]')?.addEventListener('click', async () => {
+    try { await navigator.clipboard.writeText(s.userCode); toast('设备码已复制', 'ok'); }
+    catch { toast('复制失败，请手动选中', 'err'); }
+  });
+  first.querySelector('[data-act="open"]')?.addEventListener('click', () => window.open(s.verificationUri, '_blank', 'noopener'));
+
+  // 首次轮询也要等一个 interval（服务端已做闸门，这里只是对齐节奏）
+  ghTimer = setTimeout(tick, Math.max(1, s.interval || 5) * 1000);
+  dispose = () => stopGhPoll();
+}
+
+/* ============================================================
+   GitHub · 仓库详情
+   ============================================================ */
+
+export async function openGithubRepo(ctx, owner, name) {
+  let cwd = ''; // 当前浏览的目录
+  let branch = null;
+  let detail = null;
+
+  mount(`<div class="modal modal-lg"><div class="modal-head"><h3 class="modal-title">${esc(owner)}/${esc(name)}</h3></div>
+    <div class="modal-body"><div class="loading"><span class="spinner"></span><span>读取仓库信息</span></div></div></div>`);
+
+  try {
+    detail = await api.ghRepo(owner, name);
+    branch = detail.repo.defaultBranch;
+  } catch (e) {
+    mount(`<div class="modal"><div class="modal-head"><h3 class="modal-title">读取失败</h3></div>
+      <div class="modal-body"><div class="note note-err">${esc(e.message)}</div></div>
+      <div class="modal-foot"><button class="btn" data-act="cancel">关闭</button></div></div>`);
+    $('#overlay').querySelector('[data-act="cancel"]').addEventListener('click', closeOverlay);
+    return;
+  }
+
+  let listing = null;
+
+  const paint = () => {
+    const r = detail.repo;
+    const commits = detail.commits
+      .map((c) => `<div class="list-row">
+        <span class="mono tiny muted" style="flex:0 0 56px">${esc(c.short)}</span>
+        <span style="min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(c.subject)}">${esc(c.subject)}</span>
+        <span class="tiny muted" style="flex:0 0 auto">${esc(c.author)}</span>
+        <span class="tiny muted" style="flex:0 0 70px;text-align:right">${esc(relTime(c.date))}</span>
+      </div>`)
+      .join('');
+
+    const branches = detail.branches
+      .map(
+        (b) => `<button class="badge ${b.name === branch ? 'b-blue' : 'b-plain'}" data-branch="${esc(b.name)}">
+          ${esc(b.name)}${b.protected ? ' 🔒' : ''}
+        </button>`,
+      )
+      .join(' ');
+
+    let files = '<div class="loading"><span class="spinner"></span></div>';
+    if (listing) {
+      const crumbs = ['<button class="crumb" data-path="">根目录</button>']
+        .concat(
+          cwd
+            .split('/')
+            .filter(Boolean)
+            .map((seg, i, arr) => {
+              const p = arr.slice(0, i + 1).join('/');
+              return `<span class="crumb-sep">/</span><button class="crumb" data-path="${esc(p)}">${esc(seg)}</button>`;
+            }),
+        )
+        .join('');
+      const rows = listing.entries.length
+        ? listing.entries
+            .map(
+              (e) => `<button class="file-row" data-act="${e.type === 'dir' ? 'enter' : 'open'}" data-path="${esc(e.path)}" data-sha="${esc(e.sha || '')}">
+                <span class="file-ico">${e.type === 'dir' ? '▸' : e.type === 'symlink' ? '⤳' : '·'}</span>
+                <span class="mono" style="flex:1;text-align:left">${esc(e.name)}</span>
+                <span class="tiny muted">${e.type === 'dir' ? '' : humanSize(e.size / 1024)}</span>
+              </button>`,
+            )
+            .join('')
+        : '<p class="muted tiny" style="padding:10px">空目录</p>';
+      files = `<div class="crumbs">${crumbs}</div><div class="file-list">${rows}</div>`;
+    }
+
+    return `<div class="modal modal-lg">
+      <div class="modal-head">
+        <h3 class="modal-title">${esc(r.owner)}/${esc(r.name)}</h3>
+        <p class="modal-sub">${esc(r.description || '（无描述）')}</p>
+      </div>
+      <div class="modal-body">
+        <div class="grid g-4" style="margin-bottom:14px">
+          <div class="metric"><p class="metric-label">可见性</p><p class="metric-value" style="font-size:15px">${r.private ? '私有' : '公开'}</p></div>
+          <div class="metric"><p class="metric-label">Star / Fork</p><p class="metric-value" style="font-size:15px">${r.stars} / ${r.forks}</p></div>
+          <div class="metric"><p class="metric-label">体积</p><p class="metric-value" style="font-size:15px">${esc(humanSize(r.sizeKb))}</p></div>
+          <div class="metric"><p class="metric-label">最后推送</p><p class="metric-value" style="font-size:15px">${esc(relTime(r.pushedAt))}</p></div>
+        </div>
+
+        <div class="spread" style="margin-bottom:8px">
+          <p class="section-title" style="margin:0">默认分支 · ${esc(r.defaultBranch)}</p>
+          <div class="row" style="gap:6px">
+            <button class="btn btn-sm" data-act="clone-this">克隆到本地</button>
+            <button class="btn btn-sm" data-act="new-file">新建文件…</button>
+          </div>
+        </div>
+        <div class="branch-chips" style="margin-bottom:14px">${branches}</div>
+
+        <p class="section-title">文件 · <span class="mono">${esc(branch)}</span></p>
+        <div class="card" style="padding:8px 10px;margin-bottom:14px">${files}</div>
+
+        <p class="section-title">最近提交</p>
+        <div class="card" style="padding:4px 14px">${commits || '<p class="muted tiny">暂无</p>'}</div>
+      </div>
+      <div class="modal-foot">
+        <button class="btn" data-act="cancel">关闭</button>
+      </div>
+    </div>`;
+  };
+
+  const loadDir = async (p) => {
+    cwd = p;
+    listing = null;
+    bind();
+    try {
+      const res = await api.ghContents(owner, name, p, branch);
+      listing = res.kind === 'dir' ? res : { entries: [] };
+    } catch (e) {
+      listing = { entries: [] };
+      toast(e.message, 'err');
+    }
+    bind();
+  };
+
+  const bind = () => {
+    const o = mount(paint());
+    o.querySelector('[data-act="cancel"]').addEventListener('click', closeOverlay);
+    o.querySelector('[data-act="clone-this"]').addEventListener('click', () => openCloneWizard(ctx, `${owner}/${name}`));
+    o.querySelector('[data-act="new-file"]').addEventListener('click', () => openGithubEditor(ctx, { owner, name, branch, file: null }));
+    o.querySelectorAll('[data-branch]').forEach((el) =>
+      el.addEventListener('click', () => {
+        branch = el.dataset.branch;
+        list(() => loadDir(''));
+      }),
+    );
+    o.querySelectorAll('.crumb').forEach((el) => el.addEventListener('click', () => list(() => loadDir(el.dataset.path))));
+    o.querySelectorAll('.file-row').forEach((el) =>
+      el.addEventListener('click', () => {
+        if (el.dataset.act === 'enter') list(() => loadDir(el.dataset.path));
+        else openGithubFile(ctx, owner, name, el.dataset.path, branch);
+      }),
+    );
+  };
+
+  const list = (fn) => {
+    // 目录切换时先给个 loading 再触发
+    fn();
+  };
+
+  bind();
+  await loadDir('');
+}
+
+/* ============================================================
+   GitHub · 文件查看 + 编辑提交
+   ============================================================ */
+
+export async function openGithubFile(ctx, owner, name, path, branch) {
+  mount(`<div class="modal modal-lg"><div class="modal-head"><h3 class="modal-title mono" style="font-size:13px">${esc(path)}</h3></div>
+    <div class="modal-body"><div class="loading"><span class="spinner"></span><span>读取文件</span></div></div></div>`);
+  let file;
+  try {
+    file = await api.ghContents(owner, name, path, branch);
+  } catch (e) {
+    mount(`<div class="modal"><div class="modal-head"><h3 class="modal-title">读取失败</h3></div>
+      <div class="modal-body"><div class="note note-err">${esc(e.message)}</div></div>
+      <div class="modal-foot"><button class="btn" data-act="cancel">关闭</button></div></div>`);
+    $('#overlay').querySelector('[data-act="cancel"]').addEventListener('click', closeOverlay);
+    return;
+  }
+
+  if (file.kind !== 'file') {
+    toast('这是一个目录', 'err');
+    return openGithubRepo(ctx, owner, name);
+  }
+
+  const tooBig = file.size > 1024 * 1024;
+  const o = mount(`<div class="modal modal-lg">
+    <div class="modal-head">
+      <h3 class="modal-title mono" style="font-size:13px">${esc(file.path)}</h3>
+      <p class="modal-sub">
+        ${esc(humanSize((file.size || 0) / 1024))} · <span class="mono">${esc(file.sha?.slice(0, 7) || '')}</span>
+        ${file.binary ? ' · 二进制文件' : ''}
+      </p>
+    </div>
+    <div class="modal-body">
+      ${file.binary || tooBig
+        ? `<div class="note">${file.binary ? '二进制文件不支持在线编辑。' : `文件超过 1MB（${esc(humanSize(file.size / 1024))}），不支持在线编辑。`}
+             <div style="margin-top:8px"><a class="link" href="${esc(file.htmlUrl || '#')}" target="_blank" rel="noreferrer">在 GitHub 上查看 →</a></div>
+           </div>`
+        : `<div class="code-view"><pre class="mono">${esc(file.content || '')}</pre></div>`}
+    </div>
+    <div class="modal-foot">
+      <button class="btn" data-act="cancel">关闭</button>
+      ${!file.binary && !tooBig ? '<button class="btn btn-primary" data-act="edit">编辑并提交</button>' : ''}
+    </div>
+  </div>`);
+
+  o.querySelector('[data-act="cancel"]').addEventListener('click', closeOverlay);
+  o.querySelector('[data-act="edit"]')?.addEventListener('click', () =>
+    openGithubEditor(ctx, { owner, name, branch, file }),
+  );
+}
+
+/**
+ * 提交编辑器 —— 写操作的最后一道人工确认。
+ * 流程：编辑内容 → 预览变更 → 填提交信息 → 输入仓库名二次确认 → 提交
+ */
+export async function openGithubEditor(ctx, { owner, name, branch, file }) {
+  const isNew = !file;
+  const initialPath = file?.path || '';
+  const initialContent = file?.content ?? '';
+  const sha = file?.sha || null;
+
+  const paint = () => `<div class="modal modal-lg">
+    <div class="modal-head">
+      <h3 class="modal-title">${isNew ? '在远端新建文件' : '编辑并提交到 GitHub'}</h3>
+      <p class="modal-sub">${esc(owner)}/${esc(name)} · 分支 <span class="mono">${esc(branch)}</span></p>
+    </div>
+    <div class="modal-body">
+      ${isNew
+        ? `<label class="field-label">文件路径</label>
+           <input class="input mono" id="ed-path" placeholder="例如 docs/notes.md" autocomplete="off" spellcheck="false">
+           <div style="height:12px"></div>`
+        : `<div class="tiny muted" style="margin-bottom:8px">文件：<span class="mono">${esc(initialPath)}</span></div>`}
+      <label class="field-label">内容</label>
+      <textarea class="input mono" id="ed-content" spellcheck="false" rows="14">${esc(initialContent)}</textarea>
+
+      <div style="height:14px"></div>
+      <label class="field-label">提交信息（必填）</label>
+      <input class="input" id="ed-msg" placeholder="例如：修正文档中的拼写错误" autocomplete="off">
+      <div class="tiny muted" style="margin-top:6px" id="ed-stat"></div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn" data-act="cancel">取消</button>
+      <button class="btn" data-act="preview">预览变更</button>
+      <button class="btn btn-primary" data-act="next">下一步：确认提交</button>
+    </div>
+  </div>`;
+
+  const bindMain = () => {
+    const o = mount(paint());
+    const content$ = o.querySelector('#ed-content');
+    const stat$ = o.querySelector('#ed-stat');
+    const upd = () => {
+      const now = content$.value;
+      const before = initialContent;
+      if (now === before) { stat$.textContent = isNew ? `将新建 ${now.split('\n').length} 行` : '内容未修改'; return; }
+      const a = before.split('\n').length;
+      const b = now.split('\n').length;
+      stat$.textContent = `行数 ${a} → ${b}，字符 ${before.length} → ${now.length}`;
+    };
+    content$.addEventListener('input', upd);
+    upd();
+
+    o.querySelector('[data-act="cancel"]').addEventListener('click', closeOverlay);
+    o.querySelector('[data-act="preview"]').addEventListener('click', () => {
+      const path = isNew ? o.querySelector('#ed-path').value.trim() : initialPath;
+      if (!path) return toast('请先填写文件路径', 'err');
+      confirmStep({ path, content: content$.value, message: o.querySelector('#ed-msg').value, dry: true });
+    });
+    o.querySelector('[data-act="next"]').addEventListener('click', () => {
+      const path = isNew ? o.querySelector('#ed-path').value.trim() : initialPath;
+      const content = content$.value;
+      const message = o.querySelector('#ed-msg').value.trim();
+      if (!path) return toast('请先填写文件路径', 'err');
+      if (!message || message.length < 3) return toast('提交信息不能为空且不少于 3 个字符', 'err');
+      if (content === initialContent && !isNew) return toast('内容没有变化，无需提交', 'err');
+      confirmStep({ path, content, message, dry: false });
+    });
+  };
+
+  /** 第二步：真正的二次确认 */
+  const confirmStep = async ({ path, content, message, dry }) => {
+    const o = mount(`<div class="modal modal-lg">
+      <div class="modal-head">
+        <h3 class="modal-title">确认这次远端提交</h3>
+        <p class="modal-sub">这会<b>直接在 GitHub 上产生一个提交</b>，不会经过本地仓库。</p>
+      </div>
+      <div class="modal-body">
+        <div class="loading"><span class="spinner"></span><span>正在核对远端当前版本</span></div>
+      </div>
+    </div>`);
+
+    let pre;
+    try {
+      pre = await api.ghPreview({ owner, name, path, branch });
+    } catch (e) {
+      mount(`<div class="modal"><div class="modal-head"><h3 class="modal-title">无法核对远端</h3></div>
+        <div class="modal-body"><div class="note note-err">${esc(e.message)}</div></div>
+        <div class="modal-foot"><button class="btn" data-act="back">返回编辑</button><button class="btn" data-act="cancel">关闭</button></div></div>`);
+      const oo = $('#overlay');
+      oo.querySelector('[data-act="back"]').addEventListener('click', bindMain);
+      oo.querySelector('[data-act="cancel"]').addEventListener('click', closeOverlay);
+      return;
+    }
+
+    // 乐观锁核对：我们手上的 sha 必须仍是远端当前版本
+    const remoteSha = pre.current?.sha || null;
+    let conflict = null;
+    if (isNew && remoteSha) conflict = `远端已存在同名文件（${remoteSha.slice(0, 7)}），继续提交会覆盖它。`;
+    if (!isNew && !remoteSha) conflict = '远端该文件已不存在（可能已被删除）。';
+    if (!isNew && remoteSha && sha && remoteSha !== sha && !dry) {
+      conflict = `文件已被改动：你打开时是 ${sha.slice(0, 7)}，现在是 ${remoteSha.slice(0, 7)}。`;
+    }
+
+    const before = pre.current?.content ?? null;
+    const diff = summarizeDiff(before, content);
+
+    const o2 = mount(`<div class="modal modal-lg">
+      <div class="modal-head">
+        <h3 class="modal-title">${dry ? '变更预览' : '确认这次远端提交'}</h3>
+        <p class="modal-sub">${esc(owner)}/${esc(name)} · <span class="mono">${esc(branch)}</span></p>
+      </div>
+      <div class="modal-body">
+        ${conflict ? `<div class="note note-warn" style="margin-bottom:14px"><b>版本冲突：</b>${esc(conflict)}<br><span class="tiny">建议关闭本窗口，重新打开该文件后再编辑。</span></div>` : ''}
+        <div class="kv"><span>文件</span><b class="mono">${esc(path)}</b></div>
+        <div class="kv"><span>动作</span><b>${pre.exists ? '更新' : '新建'}</b></div>
+        <div class="kv"><span>远端当前版本</span><b class="mono">${esc(remoteSha?.slice(0, 7) || '（不存在）')}</b></div>
+        <div class="kv"><span>体积变化</span><b>${pre.current ? humanSize(pre.current.size / 1024) : '—'} → ${esc(humanSize(new Blob([content]).size / 1024))}</b></div>
+        <div class="kv"><span>提交信息</span><b>${esc(message)}</b></div>
+        <div class="kv"><span>行变化</span><b>+${diff.added} / −${diff.removed}</b></div>
+
+        <p class="section-title" style="margin-top:16px">变更内容</p>
+        <div class="diff">${diff.html}</div>
+
+        ${dry ? '' : `<div style="height:14px"></div>
+        <label class="field-label">为避免误触，请再次输入仓库名 <span class="mono">${esc(name)}</span></label>
+        <input class="input mono" id="ed-confirm" placeholder="${esc(name)}" autocomplete="off" spellcheck="false">`}
+      </div>
+      <div class="modal-foot">
+        <button class="btn" data-act="back">返回编辑</button>
+        ${dry
+          ? '<button class="btn btn-primary" data-act="cancel2">知道了</button>'
+          : `<button class="btn btn-primary" data-act="submit" disabled>${conflict ? '仍要提交' : '提交到 GitHub'}</button>`}
+      </div>
+    </div>`);
+
+    const backBtn = o2.querySelector('[data-act="back"]');
+    backBtn?.addEventListener('click', bindMain);
+    o2.querySelector('[data-act="cancel2"]')?.addEventListener('click', closeOverlay);
+
+    const submitBtn = o2.querySelector('[data-act="submit"]');
+    if (submitBtn) {
+      const input = o2.querySelector('#ed-confirm');
+      input.addEventListener('input', () => { submitBtn.disabled = input.value.trim() !== name; });
+      submitBtn.addEventListener('click', async () => {
+        submitBtn.disabled = true;
+        submitBtn.textContent = '提交中…';
+        try {
+          const r = await api.ghCommit({
+            owner, name, path, content, message, sha: remoteSha, branch, confirm: name,
+          });
+          if (r.noop) {
+            mount(`<div class="modal"><div class="modal-head"><h3 class="modal-title">没有产生提交</h3></div>
+              <div class="modal-body"><div class="note">${esc(r.reason || '内容与远端一致')}</div></div>
+              <div class="modal-foot"><button class="btn" data-act="cancel">关闭</button></div></div>`);
+            $('#overlay').querySelector('[data-act="cancel"]').addEventListener('click', closeOverlay);
+            return;
+          }
+          mount(`<div class="modal">
+            <div class="modal-head"><h3 class="modal-title">已提交到 GitHub</h3>
+              <p class="modal-sub">${esc(r.action === 'create' ? '新建' : '更新')} ${esc(r.path)}</p></div>
+            <div class="modal-body">
+              <div class="note note-ok">
+                提交 <span class="mono">${esc(r.commitShort || '')}</span> 已创建。
+                <div style="margin-top:8px">
+                  <a class="link" href="${esc(r.commitUrl || '#')}" target="_blank" rel="noreferrer">在 GitHub 上查看这次提交 →</a>
+                </div>
+              </div>
+              <p class="tiny muted" style="margin-top:12px">
+                远端提交无法用本地快照回滚，如需撤销请在 GitHub 上 revert 该提交。
+                本次操作已记入审计日志。
+              </p>
+            </div>
+            <div class="modal-foot"><button class="btn" data-act="cancel">关闭</button></div>
+          </div>`);
+          $('#overlay').querySelector('[data-act="cancel"]').addEventListener('click', () => {
+            closeOverlay();
+            ctx.refresh?.();
+          });
+        } catch (e) {
+          submitBtn.disabled = false;
+          submitBtn.textContent = '重试提交';
+          toast(e.message, 'err');
+        }
+      });
+    }
+  };
+
+  bindMain();
+}
+
+/** 生成一份简单的行级差异（新增/删除行），足够让人看清改了什么 */
+export function summarizeDiff(before, after) {
+  const a = (before ?? '').split('\n');
+  const b = (after ?? '').split('\n');
+  const n = Math.max(a.length, b.length);
+  const rows = [];
+  let added = 0;
+  let removed = 0;
+  for (let i = 0; i < n; i++) {
+    const x = a[i];
+    const y = b[i];
+    if (x === y) {
+      if (x !== undefined) rows.push(['same', ` ${x}`]);
+      continue;
+    }
+    if (x !== undefined) { rows.push(['del', `-${x}`]); removed++; }
+    if (y !== undefined) { rows.push(['add', `+${y}`]); added++; }
+  }
+  if (!before) return { added: b.length, removed: 0, html: `<pre>${b.map((l) => esc('+' + l)).join('\n')}</pre>` };
+  if (rows.length > 400) rows.length = 400;
+  const html = `<pre>${rows.map(([k, t]) => `<span class="d-${k}">${esc(t)}</span>`).join('\n')}</pre>`;
+  return { added, removed, html };
+}
+
+/* ============================================================
+   GitHub · 克隆向导
+   ============================================================ */
+
+export async function openCloneWizard(ctx, presetUrl = '') {
+  let parsed = null;
+  let parentDir = '';
+
+  const paint = () => `<div class="modal">
+    <div class="modal-head">
+      <h3 class="modal-title">从 GitHub 克隆到本地</h3>
+      <p class="modal-sub">克隆是<b>只读远端</b>的：不会修改 GitHub 上的任何东西。</p>
+    </div>
+    <div class="modal-body">
+      <label class="field-label">仓库地址</label>
+      <input class="input mono" id="cl-url" placeholder="owner/name 或 https://github.com/owner/name" value="${esc(presetUrl)}" autocomplete="off" spellcheck="false">
+
+      <div style="height:12px"></div>
+      <label class="field-label">克隆到</label>
+      <div class="row" style="gap:8px">
+        <input class="input mono" id="cl-dir" placeholder="选择一个父目录，仓库会建在它下面" value="${esc(parentDir)}" autocomplete="off" spellcheck="false">
+        <button class="btn" data-act="pick" style="flex:0 0 auto">选择…</button>
+      </div>
+
+      <div style="height:12px"></div>
+      <label class="field-label">目录名（可选）</label>
+      <input class="input mono" id="cl-name" placeholder="留空则使用仓库名" autocomplete="off" spellcheck="false">
+
+      <div id="cl-info" style="margin-top:14px"></div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn" data-act="cancel">取消</button>
+      <button class="btn btn-primary" data-act="go">开始克隆</button>
+    </div>
+  </div>`;
+
+  const o = mount(paint());
+  const url$ = o.querySelector('#cl-url');
+  const dir$ = o.querySelector('#cl-dir');
+  const name$ = o.querySelector('#cl-name');
+  const info$ = o.querySelector('#cl-info');
+
+  const refreshInfo = async () => {
+    const raw = url$.value.trim();
+    if (!raw) { info$.innerHTML = ''; return; }
+    try {
+      const p = await api.ghParse(raw);
+      parsed = p;
+      const dest = dir$.value.trim() ? `${dir$.value.trim().replace(/[\\/]$/, '')}\\${name$.value.trim() || p.name}` : '';
+      info$.innerHTML = `<div class="note">
+        <div><b>${esc(p.owner)}/${esc(p.name)}</b></div>
+        <div class="tiny muted mono" style="margin-top:4px">${esc(p.httpsUrl)}</div>
+        ${dest ? `<div class="tiny" style="margin-top:8px">将创建到 <span class="mono">${esc(dest)}</span></div>` : ''}
+      </div>`;
+    } catch (e) {
+      parsed = null;
+      info$.innerHTML = `<div class="note note-err">${esc(e.message)}</div>`;
+    }
+  };
+  url$.addEventListener('input', refreshInfo);
+  dir$.addEventListener('input', refreshInfo);
+  name$.addEventListener('input', refreshInfo);
+  if (presetUrl) refreshInfo();
+
+  o.querySelector('[data-act="cancel"]').addEventListener('click', closeOverlay);
+  o.querySelector('[data-act="pick"]').addEventListener('click', async () => {
+    try {
+      const r = await api.pickFolder({ title: '选择克隆到哪个目录', defaultPath: parentDir || undefined });
+      if (r?.canceled) return;
+      if (r?.path) { parentDir = r.path; dir$.value = r.path; refreshInfo(); }
+    } catch (e) { toast(e.message, 'err'); }
+  });
+
+  o.querySelector('[data-act="go"]').addEventListener('click', async () => {
+    const raw = url$.value.trim();
+    const dir = dir$.value.trim();
+    if (!raw) return toast('请填写仓库地址', 'err');
+    if (!dir) return toast('请选择要克隆到哪个目录', 'err');
+
+    const o2 = mount(`<div class="modal">
+      <div class="modal-head"><h3 class="modal-title">正在克隆…</h3><p class="modal-sub">${esc(raw)}</p></div>
+      <div class="modal-body"><div class="loading"><span class="spinner"></span><span>从 github.com 拉取，请稍候</span></div>
+        <p class="tiny muted" style="margin-top:12px">克隆一个中等大小的仓库通常需要几秒到几十秒。若网络受限可能失败，届时会给出具体原因。</p>
+      </div>
+    </div>`);
+
+    try {
+      const r = await api.ghClone({ url: raw, parentDir: dir, dirName: name$.value.trim() || undefined });
+      o2.innerHTML = `<div class="modal">
+        <div class="modal-head"><h3 class="modal-title">克隆完成</h3>
+          <p class="modal-sub">${esc(r.owner)}/${esc(r.name)} · ${(r.tookMs / 1000).toFixed(1)}s</p></div>
+        <div class="modal-body">
+          <div class="note note-ok">
+            已克隆到 <span class="mono">${esc(r.target)}</span>
+            ${r.usedAuth ? '<div class="tiny" style="margin-top:4px">使用了当前 GitHub 授权完成鉴权。</div>' : ''}
+          </div>
+          ${r.repo ? '<p class="tiny muted" style="margin-top:10px">已自动接入本系统，可以直接查看它的体检结果。</p>' : `<div class="note note-warn" style="margin-top:10px">克隆成功但自动接入失败：${esc(r.openError || '')}</div>`}
+        </div>
+        <div class="modal-foot"><button class="btn btn-primary" data-act="open">查看这个仓库</button><button class="btn" data-act="cancel">关闭</button></div>
+      </div>`;
+      o2.querySelector('[data-act="cancel"]').addEventListener('click', () => { closeOverlay(); ctx.refresh?.(); });
+      o2.querySelector('[data-act="open"]').addEventListener('click', async () => {
+        closeOverlay();
+        if (r.repo) await ctx.selectRepo?.(r.repo.id);
+        else await ctx.refresh?.();
+      });
+    } catch (e) {
+      o2.innerHTML = `<div class="modal">
+        <div class="modal-head"><h3 class="modal-title">克隆失败</h3></div>
+        <div class="modal-body"><div class="note note-err" style="white-space:pre-wrap">${esc(e.message)}</div></div>
+        <div class="modal-foot"><button class="btn" data-act="cancel">关闭</button></div>
+      </div>`;
+      o2.querySelector('[data-act="cancel"]').addEventListener('click', closeOverlay);
+    }
+  });
+}

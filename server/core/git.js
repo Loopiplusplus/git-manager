@@ -31,6 +31,7 @@ const ALLOWED = new Set([
   'cat-file',
   'add',
   'commit',
+  'clone', // 仅允许由 clone.js 以固定参数调用；URL 与目标路径在那里单独校验
 ]);
 
 // 破坏性 flag：即使上游拼错参数，也在这里被结构性拦下
@@ -47,7 +48,20 @@ const FORBIDDEN_FLAGS = [
   /^-d$/,
   /^-x$/,
   /^-X$/,
+
+  // —— 以下为 clone 引入的新攻击面 ——
+  /^--upload-pack/, // 可指定任意可执行文件 → 远程代码执行
+  /^--template/, // 可向新仓库注入任意文件
+  /^--separate-git-dir/, // 把 .git 写到仓库外的任意位置
+  /^--mirror$/, // 复制全部 refspec，包含 refs/pull 等，语义易失控
+  /^--bare$/, // 裸仓库，分析器无法工作，且易误删工作区
+  /^--config/, // 绕道写配置
+  /^--reference/, // 引用本地路径，可越界读取
+  /^--recurse-submodules/, // 子模块 URL 未经校验，等于开了后门
+  /^--remote-submodules/,
+  /^-c$/, // -c key=value 注入配置
 ];
+
 
 // 子命令级熔断：这些写操作暂不开放给引擎
 const FORBIDDEN_SUBCMDS = new Set(['gc', 'clean', 'reset', 'checkout', 'rebase', 'merge', 'push']);
@@ -76,14 +90,23 @@ export function assertSafe(args) {
   }
 }
 
-/** 执行一条 git 命令，失败抛 GitError */
-export function git(repoPath, args, { timeout = 25000 } = {}) {
+/**
+ * 执行一条 git 命令，失败抛 GitError。
+ * env 用于注入临时凭据（见 clone.js），不会写入任何文件。
+ */
+export function git(repoPath, args, { timeout = 25000, env } = {}) {
   assertSafe(args);
   return new Promise((resolve, reject) => {
     execFile(
       'git',
       ['-C', repoPath, ...args],
-      { timeout, maxBuffer: 64 * 1024 * 1024, windowsHide: true, encoding: 'utf8' },
+      {
+        timeout,
+        maxBuffer: 64 * 1024 * 1024,
+        windowsHide: true,
+        encoding: 'utf8',
+        ...(env ? { env: { ...process.env, ...env } } : {}),
+      },
       (err, stdout, stderr) => {
         if (err) {
           reject(

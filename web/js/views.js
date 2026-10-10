@@ -248,3 +248,238 @@ export function renderLog({ logs }) {
     <p class="tiny muted" style="margin-top:10px">所有写操作都会记录在此，并且可以一键撤销。快照存放在 <span class="mono">refs/gm/snapshots/*</span>，不会污染你的 stash 列表。</p>
   </div>`;
 }
+
+/* ============================================================
+   GitHub
+   ============================================================ */
+
+export function humanSize(kb) {
+  const n = Number(kb) || 0;
+  if (n < 1024) return `${n} KB`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} MB`;
+  return `${(n / 1024 / 1024).toFixed(2)} GB`;
+}
+
+/** 网络自检横幅：只在异常时出现，避免正常时也占屏 */
+export function netBanner(net) {
+  if (!net || net.verdict === 'ok') return '';
+  const tone = net.verdict === 'offline' ? 'err' : 'warn';
+  const rows = (net.targets || [])
+    .map(
+      (t) => `<div class="net-row">
+        <span class="net-dot ${t.reachable ? 'on' : 'off'}"></span>
+        <span class="mono tiny" style="flex:1">${esc(t.host)}</span>
+        <span class="tiny muted">${t.reachable ? `可用 ${t.https.ms}ms` : `不可用（${esc(t.https.reason || '?')}）`}</span>
+      </div>`,
+    )
+    .join('');
+  return `<div class="note note-${tone}" style="margin-bottom:16px">
+    <div style="font-weight:500">${esc(net.summary)}</div>
+    <div style="margin-top:8px">${rows}</div>
+    <div class="tiny muted" style="margin-top:8px">
+      GitHub 的 API 域名与 git 传输域名是分开的，部分网络（企业代理、CI 沙箱）只放行前者。
+      ${net.suspicious?.length ? `检测到 ${net.suspicious.map(esc).join('、')} 出现「TCP 通但 HTTPS 不通」，这是透明代理拦截的典型特征。` : ''}
+    </div>
+  </div>`;
+}
+
+export function renderGithub({ auth, net, repos, error, filter = {}, logs = [] } = {}) {
+  if (error) {
+    return `<div class="section">${netBanner(net)}<div class="note note-err">${esc(error)}</div></div>`;
+  }
+
+  /* ---------- 未连接：授权引导 ---------- */
+  if (!auth?.connected) {
+    const vault = auth?.vault || {};
+    const stale = auth?.stale ? `<div class="note note-err" style="margin-bottom:14px">保存的凭据已失效：${esc(auth.error || '')}</div>` : '';
+    return `<div class="section">
+      ${netBanner(net)}
+      ${stale}
+      <div class="gh-hero">
+        <div class="gh-mark">⌂</div>
+        <h2 style="margin:0 0 6px">连接 GitHub</h2>
+        <p class="muted" style="margin:0 0 18px;max-width:600px">
+          使用 <b>OAuth 设备码授权</b>（GitHub 官方为桌面／命令行应用设计的流程）。
+          它<b>不需要 client_secret</b>，因此本地应用可以安全使用——这正是它和普通网页 OAuth 的关键区别。
+        </p>
+
+        <div class="gh-steps">
+          <div class="gh-step">
+            <span class="gh-step-n">1</span>
+            <div>
+              <div>注册一个 OAuth App</div>
+              <div class="tiny muted">打开
+                <a class="link" href="https://github.com/settings/applications/new" target="_blank" rel="noreferrer">GitHub → Settings → Developer settings → New OAuth App</a>
+              </div>
+              <div class="tiny muted" style="margin-top:4px">
+                Application name 随意；Homepage URL 填 <span class="mono">http://127.0.0.1:4599</span>；
+                Authorization callback URL 可留空（设备码流程不使用回调）。
+              </div>
+            </div>
+          </div>
+          <div class="gh-step">
+            <span class="gh-step-n">2</span>
+            <div>
+              <div>在该 OAuth App 设置里勾选 <b>Enable Device Flow</b></div>
+              <div class="tiny muted">最容易漏的一步。不勾选，授权会直接失败。</div>
+            </div>
+          </div>
+          <div class="gh-step">
+            <span class="gh-step-n">3</span>
+            <div>
+              <div>复制 <b>Client ID</b> 填到下面</div>
+              <div class="tiny muted">Client ID 是公开值，<b>不是密钥</b>；旁边的 Client Secret 用不到，不要填进来。</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="row" style="gap:8px;margin:18px 0 10px">
+          <input class="input mono" id="gh-client-id" placeholder="粘贴 Client ID，例如 Iv1a2b3c4d5e6f7g8" autocomplete="off" spellcheck="false" style="flex:1">
+          <button class="btn" data-action="gh-save-client-id" style="flex:0 0 auto">保存</button>
+        </div>
+
+        <div class="row" style="gap:10px;align-items:flex-start;margin-bottom:14px;flex-wrap:wrap">
+          <div class="seg" id="gh-scope">
+            <button class="seg-item" data-action="gh-scope" data-scope="readonly">只读授权</button>
+            <button class="seg-item active" data-action="gh-scope" data-scope="write">读写授权</button>
+          </div>
+          <div class="tiny muted" id="gh-scope-hint" style="padding-top:6px;flex:1;min-width:180px">
+            读写需要 <span class="mono">repo</span> 权限（可读写你所有私有仓库），提交功能必需。
+          </div>
+        </div>
+
+        <button class="btn btn-primary btn-lg" data-action="gh-authorize">开始授权</button>
+
+        <p class="tiny" style="margin:16px 0 0">
+          <button class="link" data-action="gh-toggle-pat">改用细粒度 PAT（权限可精确到单个仓库）</button>
+        </p>
+        <div id="gh-pat-box" class="hidden" style="margin-top:10px">
+          <div class="note" style="margin:0">
+            <div class="tiny">
+              OAuth 的 <span class="mono">repo</span> 权限是「全有或全无」——能读写你<b>所有</b>私有仓库。
+              如果只想授权给某几个仓库，<b>fine-grained PAT 反而更安全</b>：
+              可在 GitHub 上把权限精确限制到「指定仓库 + Contents 读写」。
+            </div>
+            <div class="row" style="gap:8px;margin-top:10px">
+              <input class="input mono" id="gh-pat" type="password" placeholder="github_pat_… 或 ghp_…" autocomplete="off">
+              <button class="btn" data-action="gh-save-pat" style="flex:0 0 auto">验证并保存</button>
+            </div>
+            <div class="tiny muted" style="margin-top:6px">
+              获取入口：<a class="link" href="https://github.com/settings/personal-access-tokens/new" target="_blank" rel="noreferrer">Fine-grained tokens</a>
+            </div>
+          </div>
+        </div>
+
+        <div class="safe-note" style="margin-top:18px">
+          <span class="safe-dot"></span>
+          凭据安全等级：<b>${vault.mode === 'dpapi' ? 'DPAPI 加密（绑定当前 Windows 账户）' : '本地文件（0600 权限）'}</b>
+          ${vault.mode === 'dpapi' ? '——即使文件被拷走或进了网盘同步，换台机器也解不开。' : '——当前环境不支持 DPAPI，已降级为权限保护。'}
+          <br>token 明文永不返回前端，也不写入任何日志。
+        </div>
+      </div>
+    </div>`;
+  }
+
+  /* ---------- 已连接：仓库列表 ---------- */
+  const v = auth.viewer || {};
+  const scopes = (v.scopes || []).join(', ') || '（未返回 scope 头）';
+  const canWrite = (v.scopes || []).some((s) => s === 'repo' || s === 'public_repo') || auth.method === 'pat';
+
+  const list = repos?.length
+    ? repos
+        .map(
+          (r) => `<button class="gh-repo" data-action="gh-open-repo" data-owner="${esc(r.owner)}" data-name="${esc(r.name)}">
+            <span class="gh-repo-top">
+              <span class="gh-repo-name">${esc(r.name)}</span>
+              ${r.private ? '<span class="badge b-orange">私有</span>' : '<span class="badge b-gray">公开</span>'}
+              ${r.archived ? '<span class="badge b-gray">已归档</span>' : ''}
+              ${r.fork ? '<span class="badge b-plain">fork</span>' : ''}
+            </span>
+            <span class="gh-repo-desc">${esc(r.description || '（无描述）')}</span>
+            <span class="gh-repo-meta">
+              ${r.language ? `<span>● ${esc(r.language)}</span>` : ''}
+              <span>★ ${r.stars}</span>
+              <span>⑂ ${r.forks}</span>
+              <span>${humanSize(r.sizeKb)}</span>
+              <span>${esc(relTime(r.pushedAt))}</span>
+            </span>
+          </button>`,
+        )
+        .join('')
+    : `<p class="muted tiny" style="padding:20px;text-align:center">
+        ${filter.q ? `没有匹配「${esc(filter.q)}」的仓库` : '没有读取到仓库（可能授权范围不含任何仓库）'}
+      </p>`;
+
+  return `<div class="section">
+    ${netBanner(net)}
+    <div class="gh-idbar card">
+      ${v.avatar ? `<img class="gh-avatar" src="${esc(v.avatar)}" alt="" referrerpolicy="no-referrer">` : '<span class="gh-avatar gh-avatar-fallback">◍</span>'}
+      <div style="min-width:0;flex:1">
+        <div style="font-weight:500">${esc(v.name || v.login || '')}</div>
+        <div class="tiny muted">
+          <span class="mono">@${esc(v.login || '')}</span> ·
+          ${auth.method === 'pat' ? '细粒度 PAT' : auth.method === 'env' ? '环境变量 token' : 'OAuth 设备码'} ·
+          <span class="mono">${esc(scopes)}</span>
+        </div>
+      </div>
+      <div class="row" style="gap:6px;flex:0 0 auto">
+        ${canWrite ? '<span class="badge b-green">可提交</span>' : '<span class="badge b-orange">只读</span>'}
+        <button class="btn btn-sm" data-action="gh-clone-wizard">克隆仓库…</button>
+        <button class="btn btn-sm" data-action="gh-logout">退出</button>
+      </div>
+    </div>
+
+    <div class="spread" style="margin-bottom:10px">
+      <p class="section-title" style="margin:0">我的仓库 · ${repos?.length || 0}</p>
+      <div class="row" style="gap:8px">
+        <input class="input" id="gh-q" placeholder="搜索仓库…" style="width:170px" value="${esc(filter.q || '')}" autocomplete="off">
+        <div class="seg" id="gh-vis">
+          <button class="seg-item${(filter.visibility || 'all') === 'all' ? ' active' : ''}" data-action="gh-vis" data-vis="all">全部</button>
+          <button class="seg-item${filter.visibility === 'public' ? ' active' : ''}" data-action="gh-vis" data-vis="public">公开</button>
+          <button class="seg-item${filter.visibility === 'private' ? ' active' : ''}" data-action="gh-vis" data-vis="private">私有</button>
+        </div>
+        <button class="btn btn-sm" data-action="gh-refresh">刷新</button>
+      </div>
+    </div>
+
+    <div class="gh-repos">${list}</div>
+  </div>
+
+  ${renderGhLog(logs)}`;
+}
+
+/** 远端写操作的审计日志：本地仓库那套快照回滚管不着远端，所以要能查 */
+function renderGhLog(logs) {
+  if (!logs?.length) {
+    return `<div class="section">
+      <p class="section-title">远端写操作记录</p>
+      <div class="card" style="padding:14px 16px">
+        <p class="muted tiny" style="margin:0">还没有通过本系统向 GitHub 写入过任何东西。读取操作不会记在这里。</p>
+      </div>
+    </div>`;
+  }
+  const label = { 'gh-commit': '提交文件', 'gh-delete': '删除文件', 'gh-clone': '克隆到本地', 'gh-noop': '无变化（已拦截）' };
+  const badge = { 'gh-commit': 'b-blue', 'gh-delete': 'b-red', 'gh-clone': 'b-gray', 'gh-noop': 'b-plain' };
+  const rows = logs
+    .map(
+      (l) => `<tr>
+        <td class="mono tiny muted" style="white-space:nowrap">${esc(fmtDay(l.ts))}</td>
+        <td><span class="badge ${badge[l.op] || 'b-gray'}">${esc(label[l.op] || l.op)}</span></td>
+        <td class="mono tiny">${esc(l.target || '')}${l.path ? `<span class="muted"> · </span>${esc(l.path)}` : ''}</td>
+        <td class="tiny muted" style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(l.message || '')}">${esc(l.message || '')}</td>
+        <td class="mono tiny">${l.commitShort ? esc(l.commitShort) : l.to ? esc(l.to) : ''}</td>
+      </tr>`,
+    )
+    .join('');
+  return `<div class="section">
+    <p class="section-title">远端写操作记录 · ${logs.length}</p>
+    <div class="card" style="padding:14px 16px">
+      <table class="table"><thead><tr><th>时间</th><th>操作</th><th>目标</th><th>说明</th><th>提交 / 路径</th></tr></thead><tbody>${rows}</tbody></table>
+    </div>
+    <p class="tiny muted" style="margin-top:10px">
+      远端提交与本地提交不同：它直接改 GitHub 上的仓库，<b>无法用本地快照回滚</b>。
+      如需撤销，请在 GitHub 上对该提交执行 revert。
+    </p>
+  </div>`;
+}
+

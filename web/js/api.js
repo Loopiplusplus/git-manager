@@ -36,6 +36,14 @@ async function request(path, { method = 'GET', body } = {}) {
 
 const enc = encodeURIComponent;
 
+function qs(obj) {
+  const p = new URLSearchParams();
+  for (const [k, v] of Object.entries(obj || {})) {
+    if (v !== undefined && v !== null && v !== '') p.set(k, String(v));
+  }
+  return p.toString();
+}
+
 export const api = {
   health: () => request('/health'),
   listRepos: () => request('/repos'),
@@ -58,6 +66,31 @@ export const api = {
   scanStart: (root, maxDepth) => request('/scan', { method: 'POST', body: { root, maxDepth } }).then((r) => r.job),
   scanGet: (id) => request(`/scan/${enc(id)}`).then((r) => r.job),
   scanCancel: (id) => request(`/scan/${enc(id)}/cancel`, { method: 'POST' }).then((r) => r.job),
+
+  /* ---------------- GitHub ---------------- */
+  ghStatus: () => request('/gh/status'),
+  ghSetClientId: (clientId) => request('/gh/client-id', { method: 'POST', body: { clientId } }),
+  ghClearClientId: () => request('/gh/client-id', { method: 'DELETE' }),
+  ghDeviceStart: (scopeMode) => request('/gh/device/start', { method: 'POST', body: { scopeMode } }).then((r) => r.session),
+  ghDevicePoll: (id) => request(`/gh/device/${enc(id)}`).then((r) => r.session),
+  ghDeviceCancel: (id) => request(`/gh/device/${enc(id)}/cancel`, { method: 'POST' }),
+  ghSetPat: (token) => request('/gh/pat', { method: 'POST', body: { token } }),
+  ghLogout: () => request('/gh/logout', { method: 'POST' }),
+  ghRate: () => request('/gh/rate'),
+  ghRepos: (opts = {}) => request(`/gh/repos?${qs(opts)}`).then((r) => r.repos || []),
+  ghRepo: (owner, name) => request(`/gh/repo?${qs({ owner, name })}`),
+  ghContents: (owner, name, path = '', ref) => request(`/gh/contents?${qs({ owner, name, path, ref })}`),
+  ghPreview: (payload) => request('/gh/preview', { method: 'POST', body: payload }),
+  ghCommit: (payload) => request('/gh/commit', { method: 'POST', body: payload }),
+  ghDelete: (payload) => request('/gh/delete', { method: 'POST', body: payload }),
+  ghLog: () => request('/gh/log').then((r) => r.logs || []),
+  ghParse: (url) => request('/gh/parse', { method: 'POST', body: { url } }),
+  ghClone: (payload) => request('/gh/clone', { method: 'POST', body: payload }),
+
+  // 运行环境自检：GitHub 的 API 域名与 git 传输域名是分开的，
+  // 有些网络只放行前者，需要能提前告知用户，而不是让他在超时里干等。
+  netProbe: () => request('/net/probe'),
 };
+
 
 export const transportName = cfg.transport || 'http';

@@ -3,9 +3,33 @@ import { openRepo, repoId } from './core/repo.js';
 import { GitError } from './core/git.js';
 import { overview, branches, commits, activity, health } from './core/analyzer.js';
 import { preflight, switchBranch, undoLast } from './core/safety.js';
-import { listRepos, findRepo, upsertRepo, removeRepo, listLogs } from './core/store.js';
+import { listRepos, findRepo, upsertRepo, removeRepo, listLogs, addLog } from './core/store.js';
 import { pickFolder, dialogSupported } from './core/dialog.js';
 import { listDrives, startScan, getScan, cancelScan, publicJob, probeFolder } from './core/scanner.js';
+import {
+  authStatus,
+  startDeviceFlow,
+  pollDeviceFlow,
+  cancelDeviceFlow,
+  setPat,
+  logout,
+  getClientId,
+  SCOPE_PRESETS,
+} from './core/auth.js';
+import {
+  rateLimit,
+  listRepos as ghListRepos,
+  getRepo as ghGetRepo,
+  listBranches as ghListBranches,
+  listCommits as ghListCommits,
+  getContents as ghGetContents,
+  previewChange,
+  commitFile,
+  deleteFile,
+} from './core/github.js';
+import { cloneRepo, parseRepoRef } from './core/clone.js';
+import { probe as netProbe } from './core/netcheck.js';
+import { putSecret, deleteSecret, vaultInfo } from './core/secrets.js';
 
 function send(res, code, payload) {
   const body = JSON.stringify(payload ?? null);
@@ -169,6 +193,192 @@ export async function handleApi(req, res, url) {
     }
   }
 
+  /* ---------------- GitHub：授权 ---------------- */
+
+  // GET /api/gh/status
+  if (seg[0] === 'gh' && seg[1] === 'status' && method === 'GET') {
+    return send(res, 200, { ...(await authStatus()), scopePresets: SCOPE_PRESETS });
+  }
+
+  // POST /api/gh/client-id { clientId }
+  if (seg[0] === 'gh' && seg[1] === 'client-id' && method === 'POST') {
+    const body = await readBody(req);
+    const cid = String(body.clientId || '').trim();
+    if (!cid) return send(res, 400, { error: true, message: 'client_id 不能为空' });
+    if (!/^[A-Za-z0-9]{10,64}$/.test(cid)) {
+      return send(res, 400, { error: true, message: 'client_id 格式看起来不对（应为 20 位左右的字母数字串）' });
+    }
+    await putSecret('gh_client_id', cid);
+    return send(res, 200, { ok: true, clientId: cid });
+  }
+
+  // DELETE /api/gh/client-id —— 只清 client_id，不动已授权的 token
+  if (seg[0] === 'gh' && seg[1] === 'client-id' && method === 'DELETE') {
+    deleteSecret('gh_client_id');
+    return send(res, 200, { ok: true, vault: vaultInfo() });
+  }
+
+  // POST /api/gh/device/start { scopeMode }
+  if (seg[0] === 'gh' && seg[1] === 'device' && seg[2] === 'start' && method === 'POST') {
+    const body = await readBody(req).catch(() => ({}));
+    return send(res, 200, { session: await startDeviceFlow({ scopeMode: body.scopeMode || 'write' }) });
+  }
+
+  // GET /api/gh/device/:id —— 轮询授权状态
+  if (seg[0] === 'gh' && seg[1] === 'device' && seg.length === 3 && method === 'GET') {
+    return send(res, 200, { session: await pollDeviceFlow(seg[2]) });
+  }
+
+  // POST /api/gh/device/:id/cancel
+  if (seg[0] === 'gh' && seg[1] === 'device' && seg[3] === 'cancel' && method === 'POST') {
+    return send(res, 200, cancelDeviceFlow(seg[2]));
+  }
+
+  // POST /api/gh/pat { token } —— 进阶：细粒度 PAT（权限比 OAuth 的 repo scope 更精确）
+  if (seg[0] === 'gh' && seg[1] === 'pat' && method === 'POST') {
+    const body = await readBody(req);
+    return send(res, 200, await setPat(body.token));
+  }
+
+  // POST /api/gh/logout
+  if (seg[0] === 'gh' && seg[1] === 'logout' && method === 'POST') {
+    return send(res, 200, await logout());
+  }
+
+  /* ---------------- GitHub：读取 ---------------- */
+
+  // GET /api/gh/rate
+  if (seg[0] === 'gh' && seg[1] === 'rate' && method === 'GET') {
+    return send(res, 200, await rateLimit());
+  }
+
+  // GET /api/gh/repos?sort=&visibility=&q=&page=
+  if (seg[0] === 'gh' && seg[1] === 'repos' && method === 'GET') {
+    const repos = await ghListRepos({
+      perPage: Number(q.get('perPage')) || 50,
+      page: Number(q.get('page')) || 1,
+      sort: q.get('sort') || 'pushed',
+      visibility: q.get('visibility') || 'all',
+      q: q.get('q') || '',
+    });
+    return send(res, 200, { repos });
+  }
+
+  // GET /api/gh/repo?owner=&name=
+  if (seg[0] === 'gh' && seg[1] === 'repo' && seg.length === 2 && method === 'GET') {
+    const owner = q.get('owner');
+    const name = q.get('name');
+    const [repo, brs, cms] = await Promise.all([
+      ghGetRepo(owner, name),
+      ghListBranches(owner, name).catch(() => []),
+      ghListCommits(owner, name, { perPage: 15 }).catch(() => []),
+    ]);
+    return send(res, 200, { repo, branches: brs, commits: cms });
+  }
+
+  // GET /api/gh/contents?owner=&name=&path=&ref=
+  if (seg[0] === 'gh' && seg[1] === 'contents' && method === 'GET') {
+    return send(res, 200, await ghGetContents(q.get('owner'), q.get('name'), { path: q.get('path') || '', ref: q.get('ref') || undefined }));
+  }
+
+  /* ---------------- GitHub：写（预演 → 确认 → 提交） ---------------- */
+
+  // POST /api/gh/preview { owner, name, path, branch } —— 只读预演，拿乐观锁 sha
+  if (seg[0] === 'gh' && seg[1] === 'preview' && method === 'POST') {
+    const body = await readBody(req);
+    return send(res, 200, await previewChange(body));
+  }
+
+  // POST /api/gh/commit { owner, name, path, content, message, sha, branch, confirm }
+  if (seg[0] === 'gh' && seg[1] === 'commit' && method === 'POST') {
+    const body = await readBody(req, 4 * 1024 * 1024);
+
+    // 二次确认：必须把仓库名原样再写一遍，避免误触直接推到远端
+    if (body.confirm !== body.name) {
+      const e = new Error('二次确认未通过：请输入仓库名以确认这次提交');
+      e.status = 400;
+      e.code = 'NO_CONFIRM';
+      throw e;
+    }
+
+    const r = await commitFile(body);
+    const entry = addLog({
+      repoId: null,
+      source: 'github',
+      op: r.noop ? 'gh-noop' : 'gh-commit',
+      target: `${body.owner}/${body.name}`,
+      path: r.path,
+      action: r.action || null,
+      commitShort: r.commitShort || null,
+      message: String(body.message || '').slice(0, 200),
+      result: 'ok',
+      rollbackHint: r.commitUrl ? `在 GitHub 上 revert ${r.commitShort}` : null,
+    });
+    return send(res, 200, { ...r, logId: entry.id });
+  }
+
+  // POST /api/gh/delete { owner, name, path, message, sha, branch, confirm }
+  if (seg[0] === 'gh' && seg[1] === 'delete' && method === 'POST') {
+    const body = await readBody(req);
+    if (body.confirm !== body.name) {
+      const e = new Error('二次确认未通过：请输入仓库名以确认这次删除');
+      e.status = 400;
+      e.code = 'NO_CONFIRM';
+      throw e;
+    }
+    const r = await deleteFile(body);
+    const entry = addLog({
+      repoId: null,
+      source: 'github',
+      op: 'gh-delete',
+      target: `${body.owner}/${body.name}`,
+      path: r.path,
+      commitShort: r.commitShort || null,
+      message: String(body.message || '').slice(0, 200),
+      result: 'ok',
+      rollbackHint: r.commitUrl ? `在 GitHub 上 revert ${r.commitShort}` : null,
+    });
+    return send(res, 200, { ...r, logId: entry.id });
+  }
+
+  // GET /api/gh/log —— GitHub 侧写操作的审计日志
+  if (seg[0] === 'gh' && seg[1] === 'log' && method === 'GET') {
+    const all = listLogs(null, 500).filter((l) => l.source === 'github');
+    return send(res, 200, { logs: all.slice(0, Number(q.get('limit')) || 100) });
+  }
+
+  /* ---------------- GitHub：克隆到本地 ---------------- */
+
+  // POST /api/gh/parse { url } —— 先解析地址，让前端能预览将要发生什么
+  if (seg[0] === 'gh' && seg[1] === 'parse' && method === 'POST') {
+    const body = await readBody(req);
+    return send(res, 200, parseRepoRef(body.url));
+  }
+
+  // POST /api/gh/clone { url, parentDir, dirName }
+  if (seg[0] === 'gh' && seg[1] === 'clone' && method === 'POST') {
+    const body = await readBody(req);
+    const r = await cloneRepo(body);
+    addLog({
+      repoId: r.repo?.id || null,
+      source: 'github',
+      op: 'gh-clone',
+      target: `${r.owner}/${r.name}`,
+      to: r.target,
+      result: 'ok',
+      usedAuth: r.usedAuth,
+    });
+    if (r.repo) upsertRepo(r.repo);
+    return send(res, 200, r);
+  }
+
+  /* ---------------- 网络自检 ---------------- */
+
+  // GET /api/net/probe —— DNS + TCP 探测 GitHub 各域名，不携带凭据
+  if (seg[0] === 'net' && seg[1] === 'probe' && method === 'GET') {
+    return send(res, 200, await netProbe());
+  }
+
   const e = new Error(`未知接口：${method} ${url.pathname}`);
   e.status = 404;
   throw e;
@@ -181,9 +391,12 @@ export function errorPayload(err) {
     payload: {
       error: true,
       message: err.message || '未知错误',
+      code: err.code || undefined,
+      detail: err.detail || undefined,
       stderr: err.stderr || undefined,
       preflight: err.preflight || undefined,
       snapshotRef: err.snapshotRef || undefined,
+      leftover: err.leftover || undefined,
     },
   };
 }

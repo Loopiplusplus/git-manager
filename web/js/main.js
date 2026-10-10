@@ -1,16 +1,27 @@
 import { api } from './api.js';
 import { $, $$, esc, toast } from './util.js';
-import { renderEmpty, renderLoading, renderOverview, renderBranches, renderCommits, renderLog } from './views.js';
-import { openPalette, openSwitchFlow, openRepoModal, closeOverlay, pickAndOpen, openScanModal } from './palette.js';
+import { renderEmpty, renderLoading, renderOverview, renderBranches, renderCommits, renderLog, renderGithub } from './views.js';
+import {
+  openPalette,
+  openSwitchFlow,
+  openRepoModal,
+  closeOverlay,
+  pickAndOpen,
+  openScanModal,
+  openGithubAuthorize,
+  openGithubRepo,
+  openCloneWizard,
+} from './palette.js';
 
 const NAV = [
   { id: 'overview', label: '概览', ico: '◉' },
   { id: 'commits', label: '提交记录', ico: '≡' },
   { id: 'branches', label: '分支与引用', ico: '⑂' },
   { id: 'log', label: '操作日志', ico: '⟲' },
+  { id: 'github', label: 'GitHub', ico: '⌂' },
 ];
 
-const state = { repos: [], repo: null, view: 'overview' };
+const state = { repos: [], repo: null, view: 'overview', ghScope: 'write', ghFilter: { q: '', visibility: 'all' }, ghRepos: [], ghAuth: null, ghNet: null, ghError: null, ghLogs: [] };
 let seq = 0;
 
 /* ---------------- 导航 ---------------- */
@@ -56,6 +67,9 @@ async function updateUndoButton() {
 async function render() {
   const view = $('#view');
 
+  // GitHub 视图与本地仓库无关，单独走一条渲染路径
+  if (state.view === 'github') return renderGh();
+
   if (!state.repo) {
     $('#repo-name').textContent = '未接入仓库';
     const sub = $('#repo-sub');
@@ -100,6 +114,118 @@ async function render() {
   } catch (e) {
     if (mine !== seq) return;
     view.innerHTML = `<div class="note note-err">${esc(e.message)}</div>`;
+  }
+}
+
+/* ---------------- GitHub 视图 ---------------- */
+
+function applyGhFilter(list) {
+  const q = (state.ghFilter.q || '').trim().toLowerCase();
+  const vis = state.ghFilter.visibility || 'all';
+  return (list || []).filter((r) => {
+    if (vis === 'private' && !r.private) return false;
+    if (vis === 'public' && r.private) return false;
+    if (!q) return true;
+    return (
+      r.name.toLowerCase().includes(q) ||
+      String(r.fullName || '').toLowerCase().includes(q) ||
+      String(r.description || '').toLowerCase().includes(q)
+    );
+  });
+}
+
+/** 用缓存重绘（不重新请求），用于搜索框输入这类高频操作 */
+function repaintGh() {
+  const view = $('#view');
+  view.innerHTML = renderGithub({
+    auth: state.ghAuth,
+    net: state.ghNet,
+    repos: applyGhFilter(state.ghRepos),
+    error: state.ghError,
+    filter: state.ghFilter,
+    logs: state.ghLogs,
+  });
+  bindGh();
+  const q = $('#gh-q');
+  if (q) {
+    q.focus();
+    q.setSelectionRange(q.value.length, q.value.length);
+  }
+}
+
+let ghSearchTimer = null;
+
+function bindGh() {
+  const view = $('#view');
+
+  const ci = view.querySelector('#gh-client-id');
+  if (ci) ci.value = state.ghClientId || '';
+
+  const q = view.querySelector('#gh-q');
+  if (q) {
+    q.addEventListener('input', () => {
+      state.ghFilter.q = q.value;
+      clearTimeout(ghSearchTimer);
+      ghSearchTimer = setTimeout(repaintGh, 200);
+    });
+  }
+  const patInput = view.querySelector('#gh-pat');
+  if (patInput) patInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') savePat(); });
+}
+
+async function savePat() {
+  const el = $('#gh-pat');
+  if (!el) return;
+  const token = el.value.trim();
+  if (!token) return toast('请先粘贴 token', 'err');
+  try {
+    const r = await api.ghSetPat(token);
+    toast(`已连接：@${r.viewer?.login || ''}`, 'ok');
+    await renderGh();
+  } catch (e) {
+    toast(e.message, 'err');
+  }
+}
+
+async function renderGh() {
+  const view = $('#view');
+  const mine = ++seq;
+
+  $('#repo-name').textContent = 'GitHub';
+  const sub = $('#repo-sub');
+  sub.className = 'repo-sub';
+  sub.textContent = '远端仓库的读取 · 提交 · 克隆';
+  $('#btn-undo').hidden = true;
+
+  view.innerHTML = renderLoading('正在读取 GitHub…');
+
+  try {
+    const [auth, net] = await Promise.all([api.ghStatus(), api.netProbe().catch(() => null)]);
+    if (mine !== seq) return;
+    state.ghAuth = auth;
+    state.ghNet = net;
+    state.ghError = null;
+    state.ghClientId = auth.clientId || '';
+
+    // 审计日志是本地文件，与是否已授权无关
+    state.ghLogs = await api.ghLog().catch(() => []);
+    if (mine !== seq) return;
+
+    if (auth.connected) {
+      try {
+        state.ghRepos = await api.ghRepos({ perPage: 100 });
+      } catch (e) {
+        state.ghRepos = [];
+        state.ghError = e.message;
+      }
+    } else {
+      state.ghRepos = [];
+    }
+    if (mine !== seq) return;
+    repaintGh();
+  } catch (e) {
+    if (mine !== seq) return;
+    view.innerHTML = `<div class="section"><div class="note note-err">${esc(e.message)}</div></div>`;
   }
 }
 
@@ -163,6 +289,51 @@ document.addEventListener('click', async (e) => {
     }
   } else if (action === 'switch') {
     openSwitchFlow(ctx, t.dataset.branch);
+  } else if (action === 'gh-save-client-id') {
+    const v = $('#gh-client-id')?.value.trim();
+    if (!v) { toast('请先填写 Client ID', 'err'); return; }
+    try {
+      const r = await api.ghSetClientId(v);
+      state.ghClientId = r.clientId;
+      toast('Client ID 已保存', 'ok');
+    } catch (err) {
+      toast(err.message, 'err');
+    }
+  } else if (action === 'gh-scope') {
+    state.ghScope = t.dataset.scope;
+    $$('#gh-scope .seg-item').forEach((el) => el.classList.toggle('active', el === t));
+    const hint = $('#gh-scope-hint');
+    if (hint) {
+      hint.innerHTML =
+        state.ghScope === 'readonly'
+          ? '只读授权仅能查看仓库，<b>无法提交</b>。适合先试水。'
+          : '读写需要 <span class="mono">repo</span> 权限（可读写你所有私有仓库），提交功能必需。';
+    }
+  } else if (action === 'gh-authorize') {
+    openGithubAuthorize(ctx);
+  } else if (action === 'gh-toggle-pat') {
+    $('#gh-pat-box')?.classList.toggle('hidden');
+    $('#gh-pat')?.focus();
+  } else if (action === 'gh-save-pat') {
+    await savePat();
+  } else if (action === 'gh-open-repo') {
+    openGithubRepo(ctx, t.dataset.owner, t.dataset.name);
+  } else if (action === 'gh-vis') {
+    state.ghFilter.visibility = t.dataset.vis;
+    repaintGh();
+  } else if (action === 'gh-refresh') {
+    await renderGh();
+  } else if (action === 'gh-clone-wizard') {
+    openCloneWizard(ctx);
+  } else if (action === 'gh-logout') {
+    try {
+      const r = await api.ghLogout();
+      toast(r.hadToken ? '已退出，本地凭据已删除' : '本来就没有保存凭据', 'ok');
+      if (r.revokeUrl) toast(`如需彻底撤销，请到 ${r.revokeUrl} 移除该应用授权`, '');
+      await renderGh();
+    } catch (err) {
+      toast(err.message, 'err');
+    }
   } else if (action === 'undo') {
     try {
       const r = await api.undo(state.repo.id);
