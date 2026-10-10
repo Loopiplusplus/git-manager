@@ -190,6 +190,46 @@ for (const [code, expectStatus, expectPattern] of [
   if (expectPattern) check(`${code} → 有中文可读提示`, expectPattern.test(r.error || ''), r.error);
 }
 
+/* ---------- 4b. 设备码端点本身返回 GitHub 的 404 {"error":"Not Found"} ----------
+   这是真机上最常见的一种失败：client_id 不存在时 GitHub 就回这个（已实测确认）。
+   如果映射表命中不了，用户只会看到一句光秃秃的 "Not Found"，完全不知道怎么排查。 */
+{
+  auth.setFetchImpl(makeFetch(() => jsonResponse({ error: 'Not Found' }, 404)));
+  let err = null;
+  try {
+    await auth.startDeviceFlow({ clientId: CLIENT_ID });
+  } catch (e) {
+    err = e;
+  }
+  const msg = err?.message || '';
+  check('设备码端点返回 Not Found → 抛出错误而不是静默通过', !!err);
+  check('Not Found 被映射成中文可读提示', /client_id/.test(msg), msg);
+  check('提示里包含三个排查方向（复制/存在/Device Flow）', /Enable Device Flow/.test(msg), msg);
+  check('不再出现裸英文 Not Found 作为全部内容', msg !== 'Not Found', msg);
+}
+
+/* ---------- 4c. 错误码的大小写与分隔符不统一时也要能命中映射 ---------- */
+for (const variant of ['Not Found', 'NOT-FOUND', 'not found', 'Not_Found']) {
+  auth.setFetchImpl(
+    makeFetch((url) => {
+      if (url.includes('/login/device/code')) {
+        return jsonResponse({
+          device_code: 'D',
+          user_code: 'AAAA-BBBB',
+          verification_uri: 'https://github.com/login/device',
+          expires_in: 900,
+          interval: 1,
+        });
+      }
+      return jsonResponse({ error: variant });
+    }),
+  );
+  const s = await auth.startDeviceFlow({ clientId: CLIENT_ID });
+  await waitThroughGate(s.interval);
+  const r = await auth.pollDeviceFlow(s.id);
+  check(`错误码变体「${variant}」命中同一提示`, /client_id/.test(r.error || ''), r.error);
+}
+
 /* ---------- 5. 退出登录 ---------- */
 console.log('\n[5] 退出登录');
 {
@@ -228,6 +268,31 @@ console.log('\n[6] PAT 备选通道');
   }
   check('无效 PAT 被拒绝', !!badErr);
   check('无效 PAT 错误码 401', badErr?.status === 401, String(badErr?.status));
+}
+
+/* ---------- client_id 格式校验：必须放过合法格式，只拦明显粘贴错误 ---------- */
+{
+  const { looksLikeClientId } = auth;
+  const GOOD = [
+    ['经典格式（含点号）', 'Iv1.8a61f9b3a7aba766'],
+    ['新版格式', 'Ov23liAbcDefGhiJkLmN'],
+    ['无点号经典格式', 'Iv1abc123def456'],
+    ['含下划线', 'Iv1_abc123def456'],
+    ['含短横', 'Iv1-abc123-def456'],
+    ['前后带空格（应被 trim 后接受）', '  Ov23liAbcDefGhiJkLmN  '],
+  ];
+  const BAD = [
+    ['空串', ''],
+    ['纯空格', '   '],
+    ['undefined', undefined],
+    ['null', null],
+    ['整段 URL', 'https://github.com/settings/applications'],
+    ['含斜杠', 'abc/def/ghi'],
+    ['含冒号', 'abc:def'],
+    ['超长（>80）', 'a'.repeat(81)],
+  ];
+  for (const [label, v] of GOOD) check(`client_id 接受 ${label}`, looksLikeClientId(v) === true, String(v));
+  for (const [label, v] of BAD) check(`client_id 拒绝 ${label}`, looksLikeClientId(v) === false, String(v));
 }
 
 /* ---------- 收尾 ---------- */

@@ -71,6 +71,11 @@ console.log('\n[2] view 层：GitHub 未连接态（授权引导）');
   check('  └ 有开始授权按钮', html.includes('data-action="gh-authorize"'));
   check('  └ 提供 PAT 备选入口', html.includes('data-action="gh-toggle-pat"'));
   check('  └ 展示了凭据安全等级', html.includes('DPAPI'));
+  // 回归：注册表单里 Authorization callback URL 是必填的（留空会报 Callback URL can't be blank），
+  // 但设备码流程不会用到它。曾经的引导写「可留空」，会把用户直接卡在这一步。
+  check('  └ 明确告知回调地址必填', html.includes("Callback URL can't be blank"));
+  check('  └ 明确告知设备码流程不用回调地址', html.includes('根本不会用到它'));
+  check('  └ 不再出现「callback 可留空」的错误引导', !html.includes('可留空'));
   dirty(html, '未连接态');
 }
 

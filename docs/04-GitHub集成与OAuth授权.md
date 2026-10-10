@@ -85,7 +85,16 @@ GitHub 的吊销接口要求以 `client_id` + `client_secret` 做 Basic 认证�
    |---|---|
    | Application name | 随意，例如 `git-manager 本地版` |
    | Homepage URL | `http://127.0.0.1:4599` |
-   | Authorization callback URL | 可留空或填同一地址（**设备码流程不使用回调**） |
+   | Authorization callback URL | **必填**，填 `http://127.0.0.1:4599`（**设备码流程会忽略它**） |
+
+   > **这是最常见的卡点。** 该字段**留空会直接报 `Callback URL can't be blank`**，无法完成注册；
+   > 但 GitHub 官方文档写明，使用设备码流程时此字段**会被忽略**：
+   > *"If your app uses device flow instead of web application flow to generate a user access token, this field will be ignored."*
+   > 所以填一个合法地址即可，它不会被访问。
+   >
+   > 关于为什么填 `127.0.0.1` 而不是 `localhost`：OAuth RFC 建议本地回环地址使用字面量
+   > `127.0.0.1`（或 IPv6 `::1`）而非 `localhost`，以避免 hosts 解析差异。GitHub 对
+   > `http://127.0.0.1` 这类环回地址明确放行（非本地地址才强制 HTTPS）。
 
 3. **保存后，进入该 App 的设置页，勾选 `Enable Device Flow`。**
    这是最容易漏的一步 —— 不勾选的话，授权会直接以

@@ -26,11 +26,29 @@ const K_CLIENT_ID = 'gh_client_id';
 const K_TOKEN = 'gh_token';
 const K_PAT = 'gh_pat';
 
-/** scope 预设 —— 默认给最小够用的那档，而不是一上来就要最大权限 */
+/**
+ * scope 预设 —— 默认给最小够用的那档，而不是一上来就要最大权限 */
 export const SCOPE_PRESETS = {
   readonly: 'read:user public_repo read:org',
   write: 'read:user repo read:org',
 };
+
+/**
+ * client_id 的宽松格式校验。
+ *
+ * 只用来拦住明显的粘贴错误（空值、贴成 URL、贴成整段 JSON），
+ * **绝不做严格格式假设** —— GitHub 的 client_id 形状并不统一：
+ *   - 老版经典应用：`Iv1.8a61f9b3a7aba766`（**含点号**）
+ *   - 新版应用：`Ov23liAbcDefGhiJkLmN`（纯字母数字）
+ * 早先的正则 `^[A-Za-z0-9]{10,64}$` 会把含点号的经典格式直接拒掉，
+ * 属于"自己把自己锁在门外"。宁可放过，不可误拦。
+ */
+export function looksLikeClientId(value) {
+  const cid = String(value || '').trim();
+  if (!cid) return false;
+  return /^[A-Za-z0-9._-]{8,80}$/.test(cid);
+}
+
 
 /**
  * 轮询间隔下限。GitHub 实际会给 5 秒，这里夹一个下限防止我们过频打接口。
@@ -213,14 +231,24 @@ function publicSession(s) {
 
 function deviceErrorText(code, desc) {
   const map = {
-    incorrect_client_credentials: 'client_id 无效：请确认这个 OAuth App 存在，且已在设置里勾选 Enable Device Flow',
+    incorrect_client_credentials:
+      'client_id 无效：请确认这个 OAuth App 存在，且已在设置里勾选 Enable Device Flow',
     device_flow_disabled: '这个 OAuth App 没有启用 Device Flow，请到 App 设置里勾选 Enable Device Flow',
     unsupported_grant_type: '授权类型不被支持（通常是 client_id 类型不对）',
     access_denied: '授权被拒绝',
     expired_token: '设备码已过期，请重新发起授权',
-    not_found: 'client_id 不存在',
+    not_found:
+      'GitHub 不认识这个 client_id（返回 404 Not Found）。请逐项检查：' +
+      '① Client ID 是否复制完整、有没有多余空格；② 这个 OAuth App 是否真的存在（有没有被删）；' +
+      '③ 是否在 App 设置里勾选了 Enable Device Flow',
   };
-  return map[code] || `${code || '授权失败'}${desc ? `：${desc}` : ''}`;
+  // GitHub 的错误码大小写与分隔符并不统一（例如 "Not Found" vs "device_flow_disabled"），
+  // 所以先归一化再查表，否则映射永远命中不了。
+  const key = String(code || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[\s-]+/g, '_');
+  return map[key] || `${code || '授权失败'}${desc ? `：${desc}` : ''}`;
 }
 
 /* ---------------- token 生命周期 ---------------- */

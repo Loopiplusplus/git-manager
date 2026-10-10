@@ -312,8 +312,13 @@ export function renderGithub({ auth, net, repos, error, filter = {}, logs = [] }
                 <a class="link" href="https://github.com/settings/applications/new" target="_blank" rel="noreferrer">GitHub → Settings → Developer settings → New OAuth App</a>
               </div>
               <div class="tiny muted" style="margin-top:4px">
-                Application name 随意；Homepage URL 填 <span class="mono">http://127.0.0.1:4599</span>；
-                Authorization callback URL 可留空（设备码流程不使用回调）。
+                Application name 随意；Homepage URL 与 <b>Authorization callback URL 都填</b>
+                <span class="mono">http://127.0.0.1:4599</span>。
+              </div>
+              <div class="note" style="margin-top:6px;padding:7px 9px">
+                回调地址<b>必填</b>，留空会报 “Callback URL can't be blank”。
+                但设备码流程<b>根本不会用到它</b>，照上面填本地地址即可 —— GitHub 明确允许
+                <span class="mono">http://127.0.0.1</span> 这类环回地址。
               </div>
             </div>
           </div>

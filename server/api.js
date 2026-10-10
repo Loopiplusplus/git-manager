@@ -16,6 +16,7 @@ import {
   logout,
   getClientId,
   SCOPE_PRESETS,
+  looksLikeClientId,
 } from './core/auth.js';
 import {
   rateLimit,
@@ -206,8 +207,11 @@ export async function handleApi(req, res, url) {
     const body = await readBody(req);
     const cid = String(body.clientId || '').trim();
     if (!cid) return send(res, 400, { error: true, message: 'client_id 不能为空' });
-    if (!/^[A-Za-z0-9]{10,64}$/.test(cid)) {
-      return send(res, 400, { error: true, message: 'client_id 格式看起来不对（应为 20 位左右的字母数字串）' });
+    if (!looksLikeClientId(cid)) {
+      return send(res, 400, {
+        error: true,
+        message: 'client_id 格式看起来不对：应为字母/数字（可含 . _ -）的短串，例如 Iv1.8a61f9b3a7aba766 或 Ov23liAbcDefGhiJkLmN',
+      });
     }
     await putSecret('gh_client_id', cid);
     return send(res, 200, { ok: true, clientId: cid });

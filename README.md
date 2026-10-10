@@ -102,10 +102,12 @@ vibe coding 的项目往往**能跑但难维护**：临时分支堆积、WIP 提
 1. 打开 <https://github.com/settings/applications/new>
 2. `Application name` 随便填（如 `git-manager-local`）
 3. `Homepage URL` 填 `http://127.0.0.1:4599`
-4. **勾选 `Enable Device Flow`** ← 这一步必须有，否则 Device Flow 不可用
-5. `Authorization callback URL` 可留空或填同上（Device Flow 用不到）
+4. `Authorization callback URL` **也填 `http://127.0.0.1:4599`** —— ⚠️ **这个字段必填，留空会报 `Callback URL can't be blank`**；但设备码流程**根本不会用到它**，随便填个合法地址即可，GitHub 明确允许 `http://127.0.0.1` 这类环回地址
+5. **勾选 `Enable Device Flow`** ← 这一步必须有，否则授权会直接失败
 6. 点注册，复制生成的 **Client ID**，粘贴进本系统 GitHub 页的输入框并保存
-7. 点「使用 GitHub 授权」→ 页面显示 8 位设备码 → 点「打开验证页」→ 在 GitHub 页面输入设备码 → 确认
+7. 点「使用 GitHub 授权」→ 页面显示设备码 → 点「打开验证页」→ 在 GitHub 页面输入设备码 → 确认
+
+> 关于第 4 步：GitHub 官方文档写明，使用设备码流程时回调地址**会被忽略**（"If your app uses device flow ... this field will be ignored"）；但注册表单仍强制要求填写。这是最常见的一个卡点，不是配置错误。
 
 **权限范围（scope）三档可选：**
 
