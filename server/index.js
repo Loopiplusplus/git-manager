@@ -60,7 +60,11 @@ const server = http.createServer(async (req, res) => {
   try {
     if (url.pathname.startsWith('/api/')) {
       // 令牌校验（同源页面才能拿到令牌；不发送 CORS 头，杜绝跨站读取）
-      const token = req.headers['x-gm-token'];
+      // 例外：头像代理要让 <img> 直接加载，而 <img> 无法带自定义请求头，
+      // 因此只有这一个路由额外接受 ?t=<token>。其余一律只认请求头。
+      const headerToken = req.headers['x-gm-token'];
+      const queryToken = url.pathname === '/api/gh/avatar' ? url.searchParams.get('t') : null;
+      const token = headerToken || queryToken;
       if (token !== TOKEN) {
         res.writeHead(403, { 'content-type': 'application/json; charset=utf-8' });
         res.end(JSON.stringify({ error: true, message: '令牌无效' }));

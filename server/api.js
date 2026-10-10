@@ -4,7 +4,7 @@ import { GitError } from './core/git.js';
 import { overview, branches, commits, activity, health } from './core/analyzer.js';
 import { preflight, switchBranch, undoLast } from './core/safety.js';
 import { listRepos, findRepo, upsertRepo, removeRepo, listLogs, addLog } from './core/store.js';
-import { pickFolder, dialogSupported } from './core/dialog.js';
+import { pickFolder, pickFile, readTextFile, dialogSupported } from './core/dialog.js';
 import { listDrives, startScan, getScan, cancelScan, publicJob, probeFolder } from './core/scanner.js';
 import { VERSION } from './core/util.js';
 import {
@@ -28,8 +28,11 @@ import {
   previewChange,
   commitFile,
   deleteFile,
+  createRepo,
+  fetchAvatar,
 } from './core/github.js';
 import { cloneRepo, parseRepoRef } from './core/clone.js';
+import { publishStatus, publish } from './core/publish.js';
 import { probe as netProbe } from './core/netcheck.js';
 import { putSecret, deleteSecret, vaultInfo } from './core/secrets.js';
 
@@ -181,6 +184,13 @@ export async function handleApi(req, res, url) {
     if (method === 'GET' && resource === 'commits') return send(res, 200, { commits: await commits(repo, Number(q.get('limit')) || 40) });
     if (method === 'GET' && resource === 'activity') return send(res, 200, await activity(repo, Number(q.get('weeks')) || 12));
     if (method === 'GET' && resource === 'health') return send(res, 200, await health(repo));
+
+    // 本地仓库 → GitHub 的发布状态与执行
+    if (method === 'GET' && resource === 'publish-status') return send(res, 200, await publishStatus(repo.path));
+    if (method === 'POST' && resource === 'publish') {
+      const body = await readBody(req);
+      return send(res, 200, await publish(repo.path, body));
+    }
 
     if (method === 'POST' && resource === 'preflight') {
       const body = await readBody(req);
@@ -377,6 +387,69 @@ export async function handleApi(req, res, url) {
     return send(res, 200, r);
   }
 
+  /* ---------------- GitHub：头像代理 ---------------- */
+
+  /**
+   * GET /api/gh/avatar?login=xxx 或 ?u=<头像地址>
+   *
+   * 浏览器直连 avatars.githubusercontent.com 在国内网络经常失败（DNS 污染 / 无代理），
+   * 于是头像永远是裂的。这里由服务端代取（服务端通常能走系统代理）再回传字节。
+   *
+   * 注意：<img> 无法带自定义请求头，所以本路由额外接受 `?t=<token>` 形式的令牌，
+   * 见 server/index.js 的令牌校验分支。仅此一个路由放宽，其余一律只认请求头。
+   */
+  if (seg[0] === 'gh' && seg[1] === 'avatar' && method === 'GET') {
+    const av = await fetchAvatar({ login: q.get('login'), url: q.get('u'), size: Number(q.get('size')) || 160 });
+    res.writeHead(200, {
+      'content-type': av.contentType,
+      'content-length': av.bytes,
+      'cache-control': 'public, max-age=3600',
+    });
+    res.end(av.buffer);
+    return;
+  }
+
+  /* ---------------- GitHub：建仓（供发布向导预检） ---------------- */
+
+  // POST /api/gh/create-repo { name, private, description } —— 仅建空仓库，不推送
+  if (seg[0] === 'gh' && seg[1] === 'create-repo' && method === 'POST') {
+    const body = await readBody(req);
+    const r = await createRepo(body);
+    addLog({
+      repoId: null,
+      source: 'github',
+      op: 'gh-create-repo',
+      target: `${r.repo.owner}/${r.repo.name}`,
+      result: 'ok',
+    });
+    return send(res, 200, r);
+  }
+
+  /* ---------------- 文件系统：文件选择 ---------------- */
+
+  /**
+   * POST /api/fs/pick-file { title, defaultPath, filter, withContent }
+   *
+   * withContent=true 时由服务端在用户「刚选完」的瞬间把内容一并读回。
+   * 刻意不做成「传路径读内容」的通用接口 —— 那样等于给任意本地文件开了一个读取入口。
+   * 这里内容只可能来自用户亲手在弹出的原生对话框里选中的那个文件。
+   */
+  if (seg[0] === 'fs' && seg[1] === 'pick-file' && method === 'POST') {
+    const body = await readBody(req);
+    const r = await pickFile({
+      title: body.title || '选择一个文件',
+      defaultPath: body.defaultPath || '',
+      filter: body.filter || '所有文件|*.*',
+    });
+    if (!r.ok || r.cancelled || !body.withContent) return send(res, 200, r);
+    try {
+      const f = await readTextFile(r.path);
+      return send(res, 200, { ...r, ...f });
+    } catch (e) {
+      return send(res, 200, { ...r, readError: e.message });
+    }
+  }
+
   /* ---------------- 网络自检 ---------------- */
 
   // GET /api/net/probe —— DNS + TCP 探测 GitHub 各域名，不携带凭据
@@ -397,6 +470,7 @@ export function errorPayload(err) {
       error: true,
       message: err.message || '未知错误',
       code: err.code || undefined,
+      hint: err.hint || undefined,
       detail: err.detail || undefined,
       stderr: err.stderr || undefined,
       preflight: err.preflight || undefined,

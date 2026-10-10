@@ -990,11 +990,14 @@ export async function openGithubRepo(ctx, owner, name) {
       const rows = listing.entries.length
         ? listing.entries
             .map(
-              (e) => `<button class="file-row" data-act="${e.type === 'dir' ? 'enter' : 'open'}" data-path="${esc(e.path)}" data-sha="${esc(e.sha || '')}">
-                <span class="file-ico">${e.type === 'dir' ? '▸' : e.type === 'symlink' ? '⤳' : '·'}</span>
-                <span class="mono" style="flex:1;text-align:left">${esc(e.name)}</span>
-                <span class="tiny muted">${e.type === 'dir' ? '' : humanSize(e.size / 1024)}</span>
-              </button>`,
+              (e) => `<div class="file-row">
+                <button class="file-main" data-act="${e.type === 'dir' ? 'enter' : 'open'}" data-path="${esc(e.path)}" data-sha="${esc(e.sha || '')}">
+                  <span class="file-ico">${e.type === 'dir' ? '▸' : e.type === 'symlink' ? '⤳' : '·'}</span>
+                  <span class="mono" style="flex:1;text-align:left">${esc(e.name)}</span>
+                  <span class="tiny muted">${e.type === 'dir' ? '' : humanSize(e.size / 1024)}</span>
+                </button>
+                ${e.type === 'file' ? `<button class="btn btn-sm file-edit" data-act="edit" data-path="${esc(e.path)}" title="编辑并提交这个文件">编辑</button>` : ''}
+              </div>`,
             )
             .join('')
         : '<p class="muted tiny" style="padding:10px">空目录</p>';
@@ -1018,7 +1021,8 @@ export async function openGithubRepo(ctx, owner, name) {
           <p class="section-title" style="margin:0">默认分支 · ${esc(r.defaultBranch)}</p>
           <div class="row" style="gap:6px">
             <button class="btn btn-sm" data-act="clone-this">克隆到本地</button>
-            <button class="btn btn-sm" data-act="new-file">新建文件…</button>
+            <button class="btn btn-sm" data-act="upload-file">上传本地文件…</button>
+            <button class="btn btn-sm btn-primary" data-act="new-file">新建文件…</button>
           </div>
         </div>
         <div class="branch-chips" style="margin-bottom:14px">${branches}</div>
@@ -1054,6 +1058,9 @@ export async function openGithubRepo(ctx, owner, name) {
     o.querySelector('[data-act="cancel"]').addEventListener('click', closeOverlay);
     o.querySelector('[data-act="clone-this"]').addEventListener('click', () => openCloneWizard(ctx, `${owner}/${name}`));
     o.querySelector('[data-act="new-file"]').addEventListener('click', () => openGithubEditor(ctx, { owner, name, branch, file: null }));
+    o.querySelector('[data-act="upload-file"]').addEventListener('click', () =>
+      openGithubUpload(ctx, { owner, name, branch, dir: cwd }),
+    );
     o.querySelectorAll('[data-branch]').forEach((el) =>
       el.addEventListener('click', () => {
         branch = el.dataset.branch;
@@ -1061,10 +1068,12 @@ export async function openGithubRepo(ctx, owner, name) {
       }),
     );
     o.querySelectorAll('.crumb').forEach((el) => el.addEventListener('click', () => list(() => loadDir(el.dataset.path))));
-    o.querySelectorAll('.file-row').forEach((el) =>
+    o.querySelectorAll('.file-row [data-act]').forEach((el) =>
       el.addEventListener('click', () => {
-        if (el.dataset.act === 'enter') list(() => loadDir(el.dataset.path));
-        else openGithubFile(ctx, owner, name, el.dataset.path, branch);
+        const act = el.dataset.act;
+        if (act === 'enter') return list(() => loadDir(el.dataset.path));
+        if (act === 'open') return openGithubFile(ctx, owner, name, el.dataset.path, branch);
+        if (act === 'edit') return openGithubEditorByPath(ctx, owner, name, el.dataset.path, branch);
       }),
     );
   };
@@ -1129,14 +1138,53 @@ export async function openGithubFile(ctx, owner, name, path, branch) {
   );
 }
 
+/** 从文件列表里直接进编辑器：现取一次内容，避免用列表里的陈旧 sha */
+export async function openGithubEditorByPath(ctx, owner, name, path, branch) {
+  mount(`<div class="modal modal-lg"><div class="modal-head"><h3 class="modal-title mono" style="font-size:13px">${esc(path)}</h3></div>
+    <div class="modal-body"><div class="loading"><span class="spinner"></span><span>读取文件</span></div></div></div>`);
+  let file;
+  try {
+    file = await api.ghContents(owner, name, path, branch);
+  } catch (e) {
+    return toast(e.message, 'err');
+  }
+  if (file.kind !== 'file') return toast('这是一个目录', 'err');
+  if (file.binary) return toast('二进制文件不支持在线编辑', 'err');
+  if (file.size > 1024 * 1024) return toast(`文件超过 1MB（${humanSize(file.size / 1024)}），不支持在线编辑`, 'err');
+  openGithubEditor(ctx, { owner, name, branch, file });
+}
+
+/**
+ * 上传本地文件到远端仓库。
+ * 之前的「新增」只有手打路径 + 手敲内容这一条路，太不实用；
+ * 这里允许直接挑一个本地文件，内容由服务端在选中那一刻读回，
+ * 之后仍走同一套「预览 → 二次确认 → 乐观锁」提交流程。
+ */
+export async function openGithubUpload(ctx, { owner, name, branch, dir = '' }) {
+  let picked;
+  try {
+    picked = await api.pickFile({ title: '选择要上传到 GitHub 的文件', withContent: true });
+  } catch (e) {
+    return toast(e.message, 'err');
+  }
+  if (!picked?.ok) return toast(picked?.message || '无法打开文件选择器', 'err');
+  if (picked.cancelled) return;
+  if (picked.readError) return toast(picked.readError, 'err');
+  if (picked.binary) return toast('这是二进制文件，暂不支持通过本系统上传', 'err');
+  if (picked.tooBig) return toast(`文件超过 1MB（${humanSize(picked.size / 1024)}），暂不支持上传`, 'err');
+
+  const targetPath = dir ? `${dir.replace(/\/$/, '')}/${picked.name}` : picked.name;
+  openGithubEditor(ctx, { owner, name, branch, file: null, presetPath: targetPath, presetContent: picked.content ?? '' });
+}
+
 /**
  * 提交编辑器 —— 写操作的最后一道人工确认。
  * 流程：编辑内容 → 预览变更 → 填提交信息 → 输入仓库名二次确认 → 提交
  */
-export async function openGithubEditor(ctx, { owner, name, branch, file }) {
+export async function openGithubEditor(ctx, { owner, name, branch, file, presetPath = '', presetContent = '' }) {
   const isNew = !file;
-  const initialPath = file?.path || '';
-  const initialContent = file?.content ?? '';
+  const initialPath = file?.path || presetPath || '';
+  const initialContent = file?.content ?? presetContent ?? '';
   const sha = file?.sha || null;
 
   const paint = () => `<div class="modal modal-lg">
@@ -1147,7 +1195,7 @@ export async function openGithubEditor(ctx, { owner, name, branch, file }) {
     <div class="modal-body">
       ${isNew
         ? `<label class="field-label">文件路径</label>
-           <input class="input mono" id="ed-path" placeholder="例如 docs/notes.md" autocomplete="off" spellcheck="false">
+           <input class="input mono" id="ed-path" value="${esc(initialPath)}" placeholder="例如 docs/notes.md" autocomplete="off" spellcheck="false">
            <div style="height:12px"></div>`
         : `<div class="tiny muted" style="margin-bottom:8px">文件：<span class="mono">${esc(initialPath)}</span></div>`}
       <label class="field-label">内容</label>
@@ -1457,4 +1505,343 @@ export async function openCloneWizard(ctx, presetUrl = '') {
       o2.querySelector('[data-act="cancel"]').addEventListener('click', closeOverlay);
     }
   });
+}
+
+/* ============================================================
+   GitHub · 本地仓库「提交并推送」
+   ============================================================ */
+
+/**
+ * 这是本系统里唯一会改变本地提交历史的路径，所以做成三步：
+ *   状态检查 → 目标与提交信息 → 输入仓库名二次确认 → 执行
+ * 之前根本没有这个入口，用户只能跑命令行；文件级的入口又埋得很深，
+ * 因此这里同时承担「把入口摆到明面上」的职责。
+ */
+export async function openPublishWizard(ctx) {
+  const repo = ctx.state.repo;
+  if (!repo) { toast('请先接入一个本地仓库'); return; }
+
+  mount(`<div class="modal modal-lg">
+    <div class="modal-head"><h3 class="modal-title">提交并推送</h3>
+      <p class="modal-sub">${esc(repo.name)}</p></div>
+    <div class="modal-body"><div class="loading"><span class="spinner"></span><span>正在检查仓库状态</span></div></div>
+  </div>`);
+  dispose = escClose(closeOverlay);
+
+  let st;
+  let gh;
+  try {
+    [st, gh] = await Promise.all([api.publishStatus(repo.id), api.ghStatus()]);
+  } catch (e) {
+    return showError('读取仓库状态失败', e);
+  }
+
+  /* ---- 未连接 GitHub：给一条去连接的路，而不是一句空报错 ---- */
+  if (!gh.connected) {
+    mount(`<div class="modal">
+      <div class="modal-head"><h3 class="modal-title">还没有连接 GitHub</h3></div>
+      <div class="modal-body">
+        <div class="note">推送需要 GitHub 授权。当前尚未连接，无法确定要推给谁。</div>
+        <p class="tiny muted" style="margin-top:10px">仓库状态已经读取完毕，连接后可以直接回来继续。</p>
+      </div>
+      <div class="modal-foot">
+        <button class="btn" data-act="cancel">关闭</button>
+        <button class="btn btn-primary" data-act="go-gh">去连接 GitHub</button>
+      </div>
+    </div>`);
+    $('#overlay').querySelector('[data-act="cancel"]').addEventListener('click', closeOverlay);
+    $('#overlay').querySelector('[data-act="go-gh"]').addEventListener('click', async () => {
+      closeOverlay();
+      ctx.state.view = 'github';
+      await ctx.refresh?.();
+    });
+    return;
+  }
+
+  /* ---- 工作区与提交历史的状态提示 ---- */
+  const ch = st.changes || { total: 0, files: [] };
+  const hasGitIdentity = !!st.identity?.configured;
+
+  /* ---- 表单 ---- */
+  const state = {
+    mode: st.remote.isGithub ? 'existing' : 'create',
+    repoName: repo.name || '',
+    isPrivate: true,
+    description: '',
+    owner: st.remote.owner || gh.viewer?.login || '',
+    name: st.remote.name || '',
+    branch: st.branch,
+    includeChanges: ch.total > 0,
+    message: '',
+    repos: null,
+    repoLoading: false,
+  };
+
+  const changeList = () => {
+    if (!ch.total) {
+      return '<div class="note" style="margin:0">工作区干净，没有需要提交的改动。</div>';
+    }
+    const shown = ch.files.slice(0, 12);
+    const rows = shown
+      .map((f) => `<div class="pub-file"><span class="badge ${f.untracked ? 'b-gray' : 'b-blue-soft'}">${esc(f.label)}</span><span class="mono" style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(f.path)}</span></div>`)
+      .join('');
+    const more = ch.total > shown.length ? `<div class="tiny muted" style="margin-top:6px">还有 ${ch.total - shown.length} 项未列出…</div>` : '';
+    return `<div class="pub-files">${rows}</div>${more}`;
+  };
+
+  const repoOptions = () => {
+    if (state.repoLoading) return '<option>正在读取你的仓库…</option>';
+    const list = state.repos || [];
+    if (!list.length) return '<option value="">（没有读取到仓库，可直接填 owner/name）</option>';
+    return ['<option value="">— 选择我的仓库 —</option>']
+      .concat(list.map((r) => `<option value="${esc(r.fullName)}"${state.owner && state.name && r.fullName === `${state.owner}/${state.name}` ? ' selected' : ''}>${esc(r.fullName)}${r.private ? ' （私有）' : ''}</option>`))
+      .join('');
+  };
+
+  const paint = () => `<div class="modal modal-lg">
+    <div class="modal-head">
+      <h3 class="modal-title">提交并推送</h3>
+      <p class="modal-sub">${esc(repo.name)} · 分支 <span class="mono">${esc(state.branch)}</span>
+        ${st.headShort ? `· 当前 <span class="mono">${esc(st.headShort)}</span>` : '· 尚无提交'}</p>
+    </div>
+    <div class="modal-body">
+      ${st.reasons.length ? `<div class="note note-err" style="margin-bottom:14px">${st.reasons.map((r) => esc(r)).join('<br>')}</div>` : ''}
+
+      <p class="section-title" style="margin-top:0">1 · 推到哪个仓库</p>
+      <div class="seg" id="pub-mode">
+        <button class="seg-item${state.mode === 'create' ? ' active' : ''}" data-mode="create">新建 GitHub 仓库</button>
+        <button class="seg-item${state.mode === 'existing' ? ' active' : ''}" data-mode="existing">推送到已有仓库</button>
+      </div>
+
+      <div id="pub-target" style="margin-top:12px">
+        ${state.mode === 'create'
+          ? `<label class="field-label">新仓库名</label>
+             <input class="input mono" id="pub-name" value="${esc(state.repoName)}" placeholder="例如 my-vibe-project" autocomplete="off" spellcheck="false">
+             <div class="row" style="gap:8px;margin-top:8px;align-items:center">
+               <div class="seg" id="pub-vis">
+                 <button class="seg-item${state.isPrivate ? ' active' : ''}" data-vis="private">私有</button>
+                 <button class="seg-item${!state.isPrivate ? ' active' : ''}" data-vis="public">公开</button>
+               </div>
+               <input class="input" id="pub-desc" value="${esc(state.description)}" placeholder="描述（可选）" autocomplete="off" style="flex:1">
+             </div>
+             <p class="tiny muted" style="margin-top:6px">会创建一个<b>空仓库</b>（不自动生成 README），这样本地历史才能直接推上去。</p>`
+          : `<label class="field-label">目标仓库</label>
+             <select class="input" id="pub-select">${repoOptions()}</select>
+             <div class="row" style="gap:8px;margin-top:8px">
+               <input class="input mono" id="pub-owner" value="${esc(state.owner)}" placeholder="owner" autocomplete="off" spellcheck="false" style="flex:1">
+               <span class="muted">/</span>
+               <input class="input mono" id="pub-repo" value="${esc(state.name)}" placeholder="repo" autocomplete="off" spellcheck="false" style="flex:1">
+             </div>
+             ${st.remote.exists && !st.remote.isGithub ? `<p class="tiny muted" style="margin-top:6px">当前 origin 指向 ${esc(st.remote.url)}，本次会把它改指到 GitHub。</p>` : ''}`}
+      </div>
+
+      <p class="section-title">2 · 提交工作区改动</p>
+      <label class="row pub-check">
+        <input type="checkbox" id="pub-include" ${state.includeChanges ? 'checked' : ''}>
+        <span>把工作区改动一并提交${ch.total ? `（${ch.total} 项）` : ''}</span>
+      </label>
+      <div style="margin-top:10px">${changeList()}</div>
+      <div style="margin-top:10px">
+        <label class="field-label">提交信息${state.includeChanges && ch.total ? '（必填）' : '（可选）'}</label>
+        <input class="input" id="pub-msg" value="${esc(state.message)}" placeholder="例如：首次发布" autocomplete="off">
+        ${!hasGitIdentity ? '<p class="tiny muted" style="margin-top:6px">这个仓库没配 git 提交身份，本次会用你已连接的 GitHub 账号代为署名（仅写入环境变量，不改任何配置文件）。</p>' : ''}
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn" data-act="cancel">取消</button>
+      <button class="btn btn-primary" data-act="next">下一步：确认</button>
+    </div>
+  </div>`;
+
+  const loadRepos = async () => {
+    if (state.repos || state.repoLoading) return;
+    state.repoLoading = true;
+    bind();
+    try {
+      state.repos = await api.ghRepos({ perPage: 100 });
+    } catch {
+      state.repos = [];
+    }
+    state.repoLoading = false;
+    bind();
+  };
+
+  const readForm = () => {
+    const q = (id) => $('#overlay').querySelector(id);
+    if (state.mode === 'create') {
+      state.repoName = q('#pub-name')?.value.trim() || '';
+    } else {
+      state.owner = q('#pub-owner')?.value.trim() || '';
+      state.name = q('#pub-repo')?.value.trim() || '';
+    }
+    state.message = q('#pub-msg')?.value ?? state.message;
+    const desc = q('#pub-desc');
+    if (desc) state.description = desc.value;
+    const inc = q('#pub-include');
+    state.includeChanges = inc ? inc.checked : state.includeChanges;
+  };
+
+  const bind = () => {
+    const o = mount(paint());
+    const q = (s) => o.querySelector(s);
+
+    q('[data-act="cancel"]').addEventListener('click', closeOverlay);
+
+    o.querySelectorAll('#pub-mode .seg-item').forEach((el) =>
+      el.addEventListener('click', () => {
+        readForm();
+        state.mode = el.dataset.mode;
+        if (state.mode === 'existing' && !state.repos) { bind(); loadRepos(); return; }
+        bind();
+      }),
+    );
+    o.querySelectorAll('#pub-vis .seg-item').forEach((el) =>
+      el.addEventListener('click', () => {
+        readForm();
+        state.isPrivate = el.dataset.vis === 'private';
+        bind();
+      }),
+    );
+    q('#pub-select')?.addEventListener('change', (e) => {
+      const v = e.target.value;
+      if (!v) return;
+      const [ow, nm] = v.split('/');
+      state.owner = ow;
+      state.name = nm;
+      bind();
+    });
+    q('#pub-include')?.addEventListener('change', (e) => {
+      readForm();
+      state.includeChanges = e.target.checked;
+      bind();
+    });
+
+    q('[data-act="next"]').addEventListener('click', () => {
+      readForm();
+      if (state.mode === 'create') {
+        if (!state.repoName) return toast('请填写新仓库名', 'err');
+        if (!/^[A-Za-z0-9._-]+$/.test(state.repoName)) return toast('仓库名只能包含字母、数字、. _ -', 'err');
+      } else {
+        if (!state.owner || !state.name) return toast('请填写目标仓库的 owner/name', 'err');
+      }
+      if (state.includeChanges && ch.total > 0 && state.message.trim().length < 3) {
+        return toast('要提交改动就必须填写提交信息（不少于 3 个字符）', 'err');
+      }
+      if (!st.hasCommits && !(state.includeChanges && ch.total > 0)) {
+        return toast('这个仓库还没有任何提交，请勾选「一并提交工作区改动」', 'err');
+      }
+      confirmStep();
+    });
+  };
+
+  /* ---- 第二步：确认 ---- */
+  const confirmStep = () => {
+    const targetName = state.mode === 'create' ? state.repoName : state.name;
+    const targetFull = state.mode === 'create' ? `${gh.viewer?.login || ''}/${state.repoName}` : `${state.owner}/${state.name}`;
+    const willCommit = state.includeChanges && ch.total > 0;
+
+    const o = mount(`<div class="modal modal-lg">
+      <div class="modal-head">
+        <h3 class="modal-title">确认这次操作</h3>
+        <p class="modal-sub">这会<b>改动本地提交历史</b>，并把内容推到 GitHub 上。</p>
+      </div>
+      <div class="modal-body">
+        <div class="kv"><span>目标仓库</span><b class="mono">${esc(targetFull)}</b></div>
+        <div class="kv"><span>仓库动作</span><b>${state.mode === 'create' ? '新建空仓库' : '使用已有仓库'}</b></div>
+        <div class="kv"><span>分支</span><b class="mono">${esc(state.branch)}</b></div>
+        <div class="kv"><span>本地提交</span><b>${willCommit ? `会提交 ${ch.total} 项改动` : '不提交改动，只推送已有提交'}</b></div>
+        ${willCommit ? `<div class="kv"><span>提交信息</span><b>${esc(state.message)}</b></div>` : ''}
+        <div class="kv"><span>快照</span><b>提交前会自动记一个 <span class="mono">refs/gm/prepush/*</span>，可回退</b></div>
+
+        ${willCommit ? `<p class="section-title" style="margin-top:16px">将提交的文件</p><div class="pub-files">${ch.files.slice(0, 20).map((f) => `<div class="pub-file"><span class="badge ${f.untracked ? 'b-gray' : 'b-blue-soft'}">${esc(f.label)}</span><span class="mono" style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(f.path)}</span></div>`).join('')}${ch.total > 20 ? `<div class="tiny muted" style="margin-top:6px">还有 ${ch.total - 20} 项…</div>` : ''}</div>` : ''}
+
+        <div style="height:14px"></div>
+        <label class="field-label">为避免误触，请输入仓库名 <span class="mono">${esc(targetName)}</span></label>
+        <input class="input mono" id="pub-confirm" placeholder="${esc(targetName)}" autocomplete="off" spellcheck="false">
+      </div>
+      <div class="modal-foot">
+        <button class="btn" data-act="back">返回修改</button>
+        <button class="btn btn-primary" data-act="submit" disabled>执行</button>
+      </div>
+    </div>`);
+
+    o.querySelector('[data-act="back"]').addEventListener('click', bind);
+
+    const submit = o.querySelector('[data-act="submit"]');
+    const input = o.querySelector('#pub-confirm');
+    input.addEventListener('input', () => { submit.disabled = input.value.trim() !== targetName; });
+
+    submit.addEventListener('click', async () => {
+      submit.disabled = true;
+      submit.textContent = '执行中…';
+      o.querySelector('.modal-body').innerHTML =
+        '<div class="loading"><span class="spinner"></span><span>正在提交并推送，请稍候</span></div>' +
+        '<p class="tiny muted" style="margin-top:12px">首次推送会把本地全部历史传上去，仓库大的话会慢一些。</p>';
+      try {
+        const r = await api.publish(repo.id, {
+          mode: state.mode,
+          repoName: state.mode === 'create' ? state.repoName : undefined,
+          private: state.isPrivate,
+          description: state.description,
+          owner: state.mode === 'existing' ? state.owner : undefined,
+          name: state.mode === 'existing' ? state.name : undefined,
+          message: state.message,
+          includeChanges: state.includeChanges,
+          branch: state.branch,
+          confirm: targetName,
+        });
+        done(r);
+      } catch (e) {
+        showError('推送失败', e, bind);
+      }
+    });
+  };
+
+  const done = (r) => {
+    mount(`<div class="modal">
+      <div class="modal-head"><h3 class="modal-title">已推送</h3>
+        <p class="modal-sub">${esc(r.owner)}/${esc(r.name)} · ${(r.tookMs / 1000).toFixed(1)}s</p></div>
+      <div class="modal-body">
+        <div class="note note-ok">
+          ${r.created ? '远端仓库已创建，' : ''}分支 <span class="mono">${esc(r.branch)}</span> 已推送${r.committed ? `，本地提交 <span class="mono">${esc(r.commitShort || '')}</span> 已创建` : ''}。
+          <div style="margin-top:8px"><a class="link" href="${esc(r.webUrl)}" target="_blank" rel="noreferrer">在 GitHub 上查看 →</a></div>
+        </div>
+        <div style="margin-top:14px">${r.steps.map((s) => `<div class="pub-step"><span class="badge ${s.ok ? 'b-green' : 'b-gray'}">${s.ok ? '✓' : '—'}</span><span class="tiny">${esc(s.detail)}</span></div>`).join('')}</div>
+        ${r.snapshotRef ? `<p class="tiny muted" style="margin-top:12px">回退点：<span class="mono">${esc(r.snapshotRef)}</span>（如需撤销本次本地提交：<span class="mono">git reset --soft ${esc(r.snapshotRef)}</span>）</p>` : ''}
+        ${r.skippedChanges ? `<p class="tiny muted" style="margin-top:8px">注意：按你的选择跳过了提交，工作区还有 ${r.skippedChanges} 项改动没有进去。</p>` : ''}
+      </div>
+      <div class="modal-foot"><button class="btn btn-primary" data-act="close">完成</button></div>
+    </div>`);
+    $('#overlay').querySelector('[data-act="close"]').addEventListener('click', async () => {
+      closeOverlay();
+      await ctx.refresh?.();
+    });
+  };
+
+  // 注意：这里必须是 function 声明而不是 const 箭头函数。
+  // 上面读取状态失败时会「提前」调用 showError，此时后面的 const 还处于 TDZ。
+  function showError(title, e, back) {
+    const hint = e?.data?.hint || e?.hint;
+    const stderr = e?.data?.stderr || '';
+    mount(`<div class="modal modal-lg">
+      <div class="modal-head"><h3 class="modal-title">${esc(title)}</h3>
+        ${e?.data?.code ? `<p class="modal-sub mono">${esc(e.data.code)}</p>` : ''}</div>
+      <div class="modal-body">
+        <div class="note note-err" style="white-space:pre-wrap">${esc(e?.message || '未知错误')}</div>
+        ${hint ? `<div class="note note-warn" style="margin-top:12px"><b>怎么办：</b>${esc(hint)}</div>` : ''}
+        ${stderr ? `<details style="margin-top:12px"><summary class="tiny muted">原始 git 输出</summary><pre class="mono tiny note" style="white-space:pre-wrap;max-height:200px;overflow:auto;margin-top:8px">${esc(stderr)}</pre></details>` : ''}
+      </div>
+      <div class="modal-foot">
+        <button class="btn" data-act="cancel">关闭</button>
+        ${back ? '<button class="btn btn-primary" data-act="back">返回修改</button>' : ''}
+      </div>
+    </div>`);
+    const o = $('#overlay');
+    o.querySelector('[data-act="cancel"]').addEventListener('click', closeOverlay);
+    // 只有「推送失败」这条路径才会带返回按钮，此时 bind 早已初始化
+    const backBtn = o.querySelector('[data-act="back"]');
+    if (backBtn && back) backBtn.addEventListener('click', back);
+  }
+
+  bind();
 }

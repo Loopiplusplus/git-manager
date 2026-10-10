@@ -157,6 +157,14 @@ function gitEnv(token) {
 }
 
 /**
+ * 供其它模块（如 push）复用的「临时凭据注入环境」。
+ * 导出它而不是复制一份，是为了保证凭据只在这一处被拼成 base64 —— 少一处就可能多一处泄漏面。
+ */
+export function authGitEnv(token) {
+  return gitEnv(token);
+}
+
+/**
  * 执行克隆。
  * @param {{url:string, parentDir:string, dirName?:string, shallow?:boolean}} opts
  */

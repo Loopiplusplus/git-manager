@@ -423,3 +423,104 @@ export async function deleteFile({ owner, name, path: p, message, sha, branch } 
     commitUrl: data?.commit?.html_url || null,
   };
 }
+
+/* ---------------- 建仓（供「本地仓库推送到 GitHub」使用） ---------------- */
+
+/** GitHub 仓库名规则：字母数字与 . _ -，不能以 . 开头，≤100 字符 */
+export function assertRepoName(name) {
+  const s = String(name ?? '').trim();
+  if (!s) throw bad('请填写仓库名', 'BAD_NAME');
+  if (s.length > 100) throw bad('仓库名过长（上限 100 字符）', 'BAD_NAME');
+  if (!/^[A-Za-z0-9._-]+$/.test(s) || /^\./.test(s) || /^\.+$/.test(s)) {
+    throw bad('仓库名只能包含字母、数字、. _ -，且不能以 . 开头', 'BAD_NAME');
+  }
+  return s;
+}
+
+/**
+ * 在 GitHub 上新建一个仓库。
+ * auto_init 默认 false —— 必须留空仓库，否则远端会先有一个初始提交，
+ * 本地推送时会因历史不相关而被拒绝（non-fast-forward）。
+ */
+export async function createRepo({ name, description = '', private: isPrivate = false } = {}) {
+  const safeName = assertRepoName(name);
+
+  const { data } = await ghFetch('/user/repos', {
+    method: 'POST',
+    body: {
+      name: safeName,
+      description: String(description || '').slice(0, 350),
+      private: !!isPrivate,
+      auto_init: false,
+      has_issues: true,
+      has_wiki: false,
+      has_projects: false,
+    },
+  });
+
+  return { ok: true, repo: shapeRepo(data) };
+}
+
+/* ---------------- 头像代理 ---------------- */
+
+/**
+ * 头像只在浏览器里直连 GitHub 域名，国内网络经常拿不到（DNS 污染 / 无代理），
+ * 于是页面上的头像就一直是裂的。这里让**服务端代取**再回传字节：
+ * 服务端通常能走系统代理，浏览器端就不必直连外部网络了。
+ *
+ * 只接受两种入参，且主机严格白名单，避免被当成 SSRF 跳板：
+ *   - login=<登录名>  → 固定拼 https://github.com/<login>.png
+ *   - url=<头像地址>   → 仅允许 GitHub 旗下头像主机
+ */
+const AVATAR_HOSTS = new Set([
+  'avatars.githubusercontent.com',
+  'github.com',
+  'www.github.com',
+  'secure.gravatar.com',
+]);
+const AVATAR_MAX_BYTES = 2 * 1024 * 1024;
+
+export function resolveAvatarUrl({ login, url, size = 160 } = {}) {
+  if (login) {
+    const l = String(login).trim();
+    if (!/^[A-Za-z0-9-]{1,39}$/.test(l)) throw bad('登录名不合法', 'BAD_LOGIN');
+    const s = Math.min(Math.max(Number(size) || 160, 32), 460);
+    return `https://github.com/${l}.png?size=${s}`;
+  }
+  if (url) {
+    let u;
+    try {
+      u = new URL(String(url));
+    } catch {
+      throw bad('头像地址不合法', 'BAD_URL');
+    }
+    if (u.protocol !== 'https:') throw bad('头像地址必须是 https', 'BAD_PROTOCOL');
+    if (!AVATAR_HOSTS.has(u.hostname.toLowerCase())) throw bad(`头像主机不在白名单：${u.hostname}`, 'BAD_HOST');
+    return u.href;
+  }
+  throw bad('缺少 login 或 url 参数', 'NO_TARGET');
+}
+
+export async function fetchAvatar(input = {}) {
+  const target = resolveAvatarUrl(input);
+  let res;
+  try {
+    res = await fetchImpl(target, {
+      redirect: 'follow',
+      headers: { accept: 'image/*', 'user-agent': UA },
+      signal: AbortSignal.timeout(15000),
+    });
+  } catch (e) {
+    throw bad(`取头像失败：${e.message}`, 'AVATAR_FETCH_FAILED', 502);
+  }
+  if (!res.ok) throw bad(`取头像失败：HTTP ${res.status}`, 'AVATAR_FAILED', 502);
+
+  const contentType = (res.headers.get('content-type') || 'image/png').split(';')[0].trim();
+  if (!/^image\//.test(contentType)) throw bad('返回的内容不是图片', 'NOT_IMAGE', 502);
+
+  const buf = Buffer.from(await res.arrayBuffer());
+  if (!buf.length) throw bad('取到空图片', 'EMPTY_IMAGE', 502);
+  if (buf.length > AVATAR_MAX_BYTES) throw bad('头像文件过大', 'TOO_BIG', 502);
+
+  return { buffer: buf, contentType, bytes: buf.length, url: target };
+}

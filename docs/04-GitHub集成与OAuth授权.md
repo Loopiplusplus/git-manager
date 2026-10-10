@@ -176,7 +176,48 @@ GitHub 侧本身也会校验 sha，属于双重保护。
 
 **内容与远端完全一致时不产生空提交**，直接返回 no-op。
 
-### 5.3 克隆（写磁盘，只读远端）
+### 5.3 本地仓库的提交与推送（新增）
+
+前两条路都只处理「GitHub 上的单个文件」。**本地整个仓库怎么推上去**，此前完全没有入口，
+用户只能回去跑命令行 —— 这正是被反馈「找不到哪里可以提交文件」的根因。
+
+新增 `server/core/publish.js`，一次完成 `add → commit → remote → push`：
+
+```
+状态检查 → 选目标（新建空仓库 / 已有仓库）→ 勾选要提交的改动 → 提交信息
+        → 输入仓库名二次确认 → 打快照 refs/gm/prepush/* → add → commit → remote → push → 审计日志
+```
+
+**为什么必须给 `git push` 开一个口子，以及怎么开得足够窄。**
+
+`push` 原本在 `git.js` 的 `FORBIDDEN_SUBCMDS` 里整条熔断。直接放开等于拆掉引擎白名单的护城河。
+做法是：把 `push` / `remote` / `fetch` 从通用 flag 黑名单里**摘出来单独校验**，
+把参数形态固定到无法表达危险操作
+
+| 子命令 | 唯一允许的形态 | 因此结构上不可能出现 |
+|---|---|---|
+| `push` | `git push [-u\|--set-upstream] origin <单一分支名>` | `--force` / `-f` / `+refspec` / `--mirror` / `--all` / `--tags` / `--delete` / `--prune` / 通配 refspec |
+| `remote` | `remote` / `remote -v` / `remote get-url origin` / `remote add\|set-url origin <url>` | `remote remove` / `rename` / 操作非 origin 的远端 |
+| `fetch` | `git fetch origin [branch]` | 非 origin、多余参数 |
+
+因为 refspec 被限制为**单个分支名**（正则不允许 `+`、`:`、`*`），强制推送与批量推送
+不是「被拦下」，而是**根本没有语法可以写出来**。这比逐一枚举黑名单更可靠。
+
+其余约束：
+
+- 远端地址必须是 `https://github.com/owner/name(.git)`。`..` 在**原始字符串**上校验 ——
+  WHATWG URL 解析器会先把 `../` 归一化掉，事后查 `pathname` 是查不到的
+  （`https://github.com/../../etc/passwd` 会被解析成 `/etc/passwd`）。
+- 二次确认串（必须手打仓库名）校验放在**任何网络调用之前**：确认错了不该先去打一通 API。
+- 新建远端仓库时 `auto_init: false`。若生成初始 README，远端就有了本地没有的提交，
+  push 必然因 non-fast-forward 被拒 —— 这是这类工具最常见的坑。
+- 提交前把当前 HEAD 记到 `refs/gm/prepush/<branch>-<ts>`，独立命名空间，不污染 branch 列表。
+- 仓库没配 `user.email` 时，用已连接的 GitHub 账号代署名；走 `GIT_AUTHOR_*` 环境变量，
+  **不写任何配置文件**。已配过身份则原样尊重，不覆盖。
+- 凭据复用 `clone.js` 的 `authGitEnv()`（`GIT_CONFIG_COUNT` 注入），
+  保证 base64 只在一处生成，少一处就少一个泄漏面。
+
+### 5.4 克隆（写磁盘，只读远端）
 
 `git clone` 会**新增一个攻击面**，因此在引擎层做了结构性限制：
 
@@ -239,7 +280,7 @@ GIT_CONFIG_VALUE_0=Authorization: Basic <base64(x-access-token:TOKEN)>
 > 若把 403 误判为「仓库不存在」，就会**误拦用户的正常克隆**。
 > 因此只在**确认 404** 时才拦截；配额用尽等一切不确定情况一律放行，交给 git 自己去试。
 
-### 5.4 scope 设计
+### 5.5 scope 设计
 
 | 预设 | scope | 用途 |
 |---|---|---|
@@ -309,6 +350,11 @@ GitHub 的**域名是分开的**：
 | GET | `/api/gh/log` | 远端写操作审计日志 |
 | POST | `/api/gh/parse` | 解析仓库地址（不产生任何副作用） |
 | POST | `/api/gh/clone` | 克隆到本地 |
+| POST | `/api/gh/create-repo` | 新建**空仓库**（`auto_init: false`，否则推送会因历史分叉被拒） |
+| GET | `/api/gh/avatar` | 头像代理 `?login=` / `?u=`；主机白名单防 SSRF。因 `<img>` 带不了请求头，仅此路由额外接受 `?t=<token>` |
+| GET | `/api/repos/:id/publish-status` | 本地仓库发布状态（分支 / 改动清单 / origin / 领先落后 / 提交身份） |
+| POST | `/api/repos/:id/publish` | 本地仓库提交并推送（需 `confirm` == 仓库名，且校验先于网络调用） |
+| POST | `/api/fs/pick-file` | 原生文件选择器；`withContent` 时在选中瞬间读回内容 |
 
 ---
 

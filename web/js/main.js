@@ -11,6 +11,7 @@ import {
   openGithubAuthorize,
   openGithubRepo,
   openCloneWizard,
+  openPublishWizard,
 } from './palette.js';
 
 const NAV = [
@@ -62,6 +63,12 @@ async function updateUndoButton() {
   }
 }
 
+/** 顶栏「提交并推送」只在选中了一个本地仓库时出现（GitHub 页与空状态都隐藏） */
+function updatePublishButton() {
+  const btn = $('#btn-publish');
+  if (btn) btn.hidden = !(state.repo && state.view !== 'github');
+}
+
 /* ---------------- 渲染 ---------------- */
 
 async function render() {
@@ -76,12 +83,14 @@ async function render() {
     sub.className = 'repo-sub';
     sub.textContent = '接入一个本地 Git 仓库后开始体检';
     $('#btn-undo').hidden = true;
+    updatePublishButton();
     view.innerHTML = renderEmpty(state);
     return;
   }
 
   const repo = state.repo;
   const mine = ++seq;
+  updatePublishButton();
   view.innerHTML = renderLoading();
 
   try {
@@ -158,6 +167,18 @@ let ghSearchTimer = null;
 function bindGh() {
   const view = $('#view');
 
+  // CSP 是 script-src 'self'，内联 onerror 会被拦，所以头像的兜底只能在这里挂
+  view.querySelectorAll('img.gh-avatar').forEach((img) => {
+    const fail = () => {
+      img.hidden = true;
+      const fb = img.parentNode?.querySelector('.gh-avatar-fallback');
+      if (fb) fb.hidden = false;
+    };
+    img.addEventListener('error', fail);
+    // 图片可能在监听器挂上之前就已经失败了（缓存里的坏响应），补一次检查
+    if (img.complete && img.naturalWidth === 0) fail();
+  });
+
   const ci = view.querySelector('#gh-client-id');
   if (ci) ci.value = state.ghClientId || '';
 
@@ -196,6 +217,7 @@ async function renderGh() {
   sub.className = 'repo-sub';
   sub.textContent = '远端仓库的读取 · 提交 · 克隆';
   $('#btn-undo').hidden = true;
+  updatePublishButton();
 
   view.innerHTML = renderLoading('正在读取 GitHub…');
 
@@ -206,6 +228,16 @@ async function renderGh() {
     state.ghNet = net;
     state.ghError = null;
     state.ghClientId = auth.clientId || '';
+
+    // 头像改走本机代理：页面 CSP 是 img-src 'self'，外域头像会被拦掉；
+    // 而且浏览器直连 avatars.githubusercontent.com 在国内也常年失败。
+    if (auth?.viewer) {
+      auth.viewer.proxyAvatar = api.ghAvatarUrl({
+        login: auth.viewer.login,
+        url: auth.viewer.avatar,
+        size: 160,
+      });
+    }
 
     // 审计日志是本地文件，与是否已授权无关
     state.ghLogs = await api.ghLog().catch(() => []);
@@ -325,6 +357,8 @@ document.addEventListener('click', async (e) => {
     await renderGh();
   } else if (action === 'gh-clone-wizard') {
     openCloneWizard(ctx);
+  } else if (action === 'publish-wizard') {
+    openPublishWizard(ctx);
   } else if (action === 'gh-logout') {
     try {
       const r = await api.ghLogout();
@@ -352,6 +386,7 @@ $('#overlay').addEventListener('click', (e) => {
 $('#btn-switch').addEventListener('click', () => openPalette(ctx));
 $('#btn-repos').addEventListener('click', () => openRepoModal(ctx));
 $('#btn-refresh').addEventListener('click', () => ctx.refresh());
+$('#btn-publish').addEventListener('click', () => openPublishWizard(ctx));
 $('#btn-undo').addEventListener('click', async () => {
   try {
     const r = await api.undo(state.repo.id);

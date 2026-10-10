@@ -251,6 +251,7 @@ export function renderOverview({ overview: o, health: h, activity: a, commits: c
       <div class="grid g-3">${metrics}</div>
     </div>
     ${renderAiPanel(o.ai)}
+    ${renderPublishCard(o)}
   </div>
 
   <div class="section">
@@ -269,6 +270,36 @@ export function renderOverview({ overview: o, health: h, activity: a, commits: c
   <div class="section">
     <p class="section-title">最近提交</p>
     <div class="card" style="padding:6px 16px">${recent || '<p class="muted tiny">暂无提交</p>'}</div>
+  </div>`;
+}
+
+/* ---------------- 提交与推送 ---------------- */
+
+/**
+ * 「提交并推送」入口卡片。
+ * 之前的提交入口埋在「GitHub → 某仓库 → 内置文件树 → 某文件」里，用户根本找不到。
+ * 这张卡片直接把入口摆在概览页上，就是为了解决「找不到哪里可以提交文件」。
+ * 真正的状态以 publish-status 接口为准，这里只用概览里已有的数据做提示。
+ */
+export function renderPublishCard(o = {}) {
+  const dirty = Number(o?.status?.dirtyCount) || 0;
+  const branch = o?.head || o?.branch || '';
+  return `<div class="section">
+    <p class="section-title">提交与推送</p>
+    <div class="card publish-card">
+      <div class="publish-main">
+        <div class="publish-title">把本地改动提交并推送到 GitHub</div>
+        <div class="tiny muted">
+          ${dirty ? `当前有 <b>${dirty}</b> 项未提交改动，可以在同一步里一并提交。` : '工作区是干净的，可以直接推送已有提交。'}
+          ${branch ? `当前分支 <span class="mono">${esc(branch)}</span>。` : ''}
+        </div>
+      </div>
+      <button class="btn btn-primary" data-action="publish-wizard">提交并推送…</button>
+    </div>
+    <p class="tiny muted" style="margin-top:8px">
+      只想改 GitHub 上的单个文件？在 <b>GitHub → 我的仓库 → 点进仓库</b> 后，每个文件行右侧有「编辑」，
+      右上角还有「上传本地文件」与「新建文件」。
+    </p>
   </div>`;
 }
 
@@ -530,6 +561,18 @@ export function renderGithub({ auth, net, repos, error, filter = {}, logs = [] }
   const scopes = (v.scopes || []).join(', ') || '（未返回 scope 头）';
   const canWrite = (v.scopes || []).some((s) => s === 'repo' || s === 'public_repo') || auth.method === 'pat';
 
+  /**
+   * 头像有两个坑：
+   *   1. 页面 CSP 是 `img-src 'self' data:`，外域头像会被直接拦掉；
+   *   2. 就算放开 CSP，浏览器直连 avatars.githubusercontent.com 在国内也常年失败。
+   * 所以统一改走本机代理（同源、`'self'` 就够），失败时再回退到字形。
+   * 注意 CSP 是 `script-src 'self'`，内联 onerror 会被拦，错误处理在 main.js 里挂。
+   */
+  const avatarSrc = v.proxyAvatar || v.avatar;
+  const avatar = avatarSrc
+    ? `<span class="gh-avatar-slot"><img class="gh-avatar" src="${esc(avatarSrc)}" alt="" referrerpolicy="no-referrer"><span class="gh-avatar gh-avatar-fallback" hidden>◍</span></span>`
+    : '<span class="gh-avatar-slot"><span class="gh-avatar gh-avatar-fallback">◍</span></span>';
+
   const list = repos?.length
     ? repos
         .map(
@@ -558,7 +601,7 @@ export function renderGithub({ auth, net, repos, error, filter = {}, logs = [] }
   return `<div class="section">
     ${netBanner(net)}
     <div class="gh-idbar card">
-      ${v.avatar ? `<img class="gh-avatar" src="${esc(v.avatar)}" alt="" referrerpolicy="no-referrer">` : '<span class="gh-avatar gh-avatar-fallback">◍</span>'}
+      ${avatar}
       <div style="min-width:0;flex:1">
         <div style="font-weight:500">${esc(v.name || v.login || '')}</div>
         <div class="tiny muted">
@@ -587,6 +630,11 @@ export function renderGithub({ auth, net, repos, error, filter = {}, logs = [] }
       </div>
     </div>
 
+    <p class="tiny muted" style="margin:-2px 0 10px">
+      要改文件或提交：<b>点进任意仓库</b> → 文件行右侧「编辑」，或右上角「上传本地文件… / 新建文件…」。
+      要把<b>本地整个仓库</b>推上来：回左侧选一个本地仓库，用顶栏的「提交并推送」（或概览页的按钮）。
+    </p>
+
     <div class="gh-repos">${list}</div>
   </div>
 
@@ -603,8 +651,8 @@ function renderGhLog(logs) {
       </div>
     </div>`;
   }
-  const label = { 'gh-commit': '提交文件', 'gh-delete': '删除文件', 'gh-clone': '克隆到本地', 'gh-noop': '无变化（已拦截）' };
-  const badge = { 'gh-commit': 'b-blue', 'gh-delete': 'b-red', 'gh-clone': 'b-gray', 'gh-noop': 'b-plain' };
+  const label = { 'gh-commit': '提交文件', 'gh-delete': '删除文件', 'gh-clone': '克隆到本地', 'gh-noop': '无变化（已拦截）', 'publish-push': '本地推送', 'gh-create-repo': '新建仓库' };
+  const badge = { 'gh-commit': 'b-blue', 'gh-delete': 'b-red', 'gh-clone': 'b-gray', 'gh-noop': 'b-plain', 'publish-push': 'b-green', 'gh-create-repo': 'b-gray' };
   const rows = logs
     .map(
       (l) => `<tr>

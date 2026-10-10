@@ -28,7 +28,7 @@ vibe coding 的项目往往**能跑但难维护**：临时分支堆积、WIP 提
 | **提交记录** | AI 参与了哪些提交？（多信号推断，每条给依据） |
 | **分支与引用** | 哪些分支该清理？能安全地切过去吗？ |
 | **操作日志** | 我（或 AI）对它做过什么？能撤销吗？ |
-| **GitHub** | 远端有哪些仓库？能不改文件就读到内容吗？能安全地改一行并提交吗？ |
+| **GitHub** | 远端有哪些仓库？能不改文件就读到内容吗？**能把本地仓库提交并推上去吗？** 能安全地改一行并提交吗？ |
 
 ---
 
@@ -82,12 +82,23 @@ vibe coding 的项目往往**能跑但难维护**：临时分支堆积、WIP 提
 
 **读（只读）**
 - 账号身份条：头像、登录名、公开仓库数、当前 API 配额（含重置倒计时）
+  - 头像走**本机代理**（`/api/gh/avatar`）：页面 CSP 是 `img-src 'self'`，外域头像会被直接拦掉；而且浏览器直连 `avatars.githubusercontent.com` 在国内也常年失败。由服务端代取后回传，失败则回退到字形。
 - 仓库列表：搜索、公/私有过滤、按更新时间/星标/名称排序、分页
 - 单仓库详情：默认分支、语言、体积、最后推送时间
 - 文件树浏览 + 分支切换：目录逐层展开、文件内容只读预览、二进制文件自动识别并拒渲染
 
+**把本地仓库提交并推送（新增）**
+- 本地仓库视图顶栏与概览页都有「提交并推送」入口 —— 之前根本没有这个能力，用户只能跑命令行
+- 向导：状态检查 → 选目标（**新建 GitHub 仓库** 或 **推送到已有仓库**）→ 勾选要一并提交的改动 → 提交信息 → **输入仓库名二次确认** → 执行
+- 一次完成：`git add` → `git commit` → `remote add/set-url origin` → `git push -u origin <branch>`
+- 新建仓库时**不生成初始 README**，否则远端先有一个本地没有的提交，推送会因历史分叉被拒
+- 提交前自动打一个 `refs/gm/prepush/*` 快照，随时可回退
+- 仓库没配 git 提交身份时，用已连接的 GitHub 账号代署名（只写环境变量，不改任何配置文件）
+
 **写（需二次确认 + 乐观锁）**
 - 在线编辑任意文本文件（上限 1 MB），提交前先 dry-run 预演
+- 文件列表里每个文件行都有显式「编辑」按钮；右上角有「上传本地文件…」与「新建文件…」
+  —— 上传时由服务端在用户刚选完文件的瞬间读回内容（刻意不做成「给路径就读」的通用接口）
 - 提交前必须输入**仓库名**作为确认语（服务端校验 `confirm !== name` 即拒绝）
 - sha 乐观锁：预演时锁定远端 sha，提交时若不匹配则拒绝，防止覆盖别人的并发提交
 - 支持删除文件（同样走预演 + 确认 + 乐观锁）
@@ -174,6 +185,25 @@ vibe coding 的项目往往**能跑但难维护**：临时分支堆积、WIP 提
 - 未提交内容一律进快照，**永不静默丢弃**（所以 UI 上根本没有「放弃改动」这个选项）
 - 快照存于 `refs/gm/snapshots/*`，不污染你的 `git stash list`
 
+### 本地提交并推送（新增，唯一会改本地提交历史的路径）
+
+```
+状态检查 → 选目标 → 输入仓库名二次确认 → 打快照 refs/gm/prepush/* → add → commit → remote → push → 记审计日志
+```
+
+`git push` 此前是整条熔断的。现在以**窄化白名单**方式开放，参数形态完全固定：
+
+| 子命令 | 允许的形态 | 结构性排除 |
+|---|---|---|
+| `push` | `git push [-u\|--set-upstream] origin <单一分支名>` | `--force` / `-f` / `+refspec` / `--mirror` / `--all` / `--tags` / `--delete` / `--prune` / 通配 refspec —— 因为 refspec 只允许单个分支名，这些形态**根本无法表达** |
+| `remote` | `remote`（列表）/ `remote -v` / `remote get-url origin` / `remote add\|set-url origin <url>` | `remote remove` / `rename` / 操作 origin 以外的远端名 |
+| `fetch` | `git fetch origin [branch]` | 非 origin、多余参数 |
+
+- 远端地址必须是 `https://github.com/owner/name(.git)`；`..` 在**原始字符串**上校验（URL 解析器会先把它归一化掉，事后查 `pathname` 查不到），`http` / ssh / 非 github 主机一律拒绝
+- `git gc` / `clean` / `reset` / `checkout` / `rebase` / `merge` **仍然整条熔断**
+- 二次确认串校验发生在**任何网络调用之前** —— 确认错了不会先去打一通 GitHub API
+- 凭据仍走 `GIT_CONFIG_COUNT` 环境注入，**不写进 `.git/config`、不进命令行**
+
 ### 远端写操作
 
 ```
@@ -216,16 +246,17 @@ server/                    本地服务（纯 Node，零依赖）
   index.js                 HTTP 入口：本机令牌鉴权 + 静态托管
   api.js                   路由 → 参数解析（不含业务逻辑）
   core/
-    git.js                 git 引擎：命令白名单 + 危险 flag 熔断
+    git.js                 git 引擎：命令白名单 + 危险 flag 熔断 + push/remote 窄化校验
     repo.js                仓库中途接入（零侵入探测）
     analyzer.js            分析器：概览/分支/提交/热力图/健康度
     ai-signals.js          ★ AI 协作痕迹检测器（多信号 + 可解释 + 纯本地）
     safety.js              安全模块：Preflight / 快照式切换 / 撤销 / 日志
-    dialog.js              原生文件夹选择器（PowerShell 桥）
+    dialog.js              原生文件夹/文件选择器（PowerShell 桥）
     scanner.js             只读磁盘扫描（readdir + lstat）
     secrets.js             ★ 凭据仓库：DPAPI 加密落盘 + 进程内缓存
     auth.js                ★ OAuth Device Flow + PAT + 登出
-    github.js              ★ REST 客户端 + 写操作验证层（预演/乐观锁/提交/删除）
+    github.js              ★ REST 客户端 + 写操作验证层（预演/乐观锁/提交/删除）+ 建仓 + 头像代理
+    publish.js             ★ 本地仓库「提交并推送」（唯一会改本地提交历史的路径）
     clone.js               ★ 克隆 + URL 白名单 + 凭据环境注入
     netcheck.js            ★ 网络自检（真实 HTTPS 为唯一判据）
     store.js               本地存储（接口可换 SQLite）
@@ -267,6 +298,8 @@ data/                      运行时缓存（仓库列表 + 操作日志 + 加�
 | POST | `/api/repos/:id/preflight` | 切换前检查 `{ target }` |
 | POST | `/api/repos/:id/switch` | 安全切换 `{ target, strategy, message }` |
 | POST | `/api/repos/:id/undo` | 撤销上一次切换 |
+| GET | `/api/repos/:id/publish-status` | 发布状态：分支/改动清单/origin/领先落后/提交身份 |
+| POST | `/api/repos/:id/publish` | 提交并推送 `{ mode, repoName/owner+name, message, includeChanges, branch, confirm }` |
 
 ### 文件系统
 
@@ -274,6 +307,7 @@ data/                      运行时缓存（仓库列表 + 操作日志 + 加�
 |---|---|---|
 | GET | `/api/fs/drives` | 可用驱动器列表 + 是否支持原生对话框 |
 | POST | `/api/fs/pick` | 弹出**原生文件夹选择器**，返回所选路径 |
+| POST | `/api/fs/pick-file` | 弹出**原生文件选择器**；`withContent` 时由服务端在选中瞬间读回内容（不做成通用读文件接口） |
 | POST | `/api/fs/probe` | 识别目录 `{ path }`：是否仓库 / 是否在仓库内 / 有无子仓库 |
 | POST | `/api/scan` | 启动只读扫描 `{ root, maxDepth }` → `{ job }` |
 | GET | `/api/scan/:id` | 轮询扫描进度与结果 |
@@ -301,6 +335,8 @@ data/                      运行时缓存（仓库列表 + 操作日志 + 加�
 | GET | `/api/gh/log` | 远端写操作审计日志 |
 | POST | `/api/gh/parse` | 解析仓库地址（预览将要克隆什么） |
 | POST | `/api/gh/clone` | 克隆 `{ url, parentDir, dirName, depth }` |
+| POST | `/api/gh/create-repo` | 在 GitHub 新建**空仓库** `{ name, private, description }` |
+| GET | `/api/gh/avatar` | 头像代理 `?login=` 或 `?u=`（主机白名单，防 SSRF）；因 `<img>` 无法带请求头，仅此路由额外接受 `?t=<token>` |
 | GET | `/api/net/probe` | 探测 GitHub 各域名的 DNS + HTTPS 连通性 |
 
 `:id` 用仓库 id；若要用绝对路径，需 `encodeURIComponent` 后再放进 URL。
@@ -321,7 +357,8 @@ data/                      运行时缓存（仓库列表 + 操作日志 + 加�
 | 不碰系统区域 | 默认跳过 `Windows`、`Program Files`、`AppData`、`$RECYCLE.BIN` 等，以及 `node_modules` 等重量级缓存目录 |
 | 可验证 | 已实测：扫描前后被扫目录的**文件大小、修改时间、目录结构完全一致**，未新增任何文件 |
 
-> 会改动仓库的路径只有两条：**本地分支切换**与**GitHub 提交**。
+> 会改动仓库的路径只有三条：**本地分支切换**、**本地提交并推送**、**GitHub 远端提交**。
+> 三者都要经过「预演/检查 → 快照/乐观锁 → 二次确认 → 审计日志」这一整套闸门。
 > 前者必须经过 Preflight + 快照 + 日志，后者必须经过预演 + 确认 + 乐观锁 + 审计日志。
 
 ---
@@ -332,16 +369,17 @@ data/                      运行时缓存（仓库列表 + 操作日志 + 加�
 node scripts/check-oauth.mjs         # 设备码流程状态机（含失败分支）
 node scripts/check-gh-poll.mjs       # 授权面板的轮询循环（DOM 桩 + 手动定时器驱动）
 node scripts/check-github-guard.mjs  # 写操作守卫 + 路径穿越 + clone 危险 flag
+node scripts/check-publish.mjs       # 提交并推送：push/remote 窄化熔断 + 守卫 + 真实 push 端到端
 node scripts/check-clone-e2e.mjs     # 真实克隆端到端（需网络）
 node scripts/check-ai-signals.mjs    # AI 协作痕迹检测器（显式/形态/过程证据 + 诚实边界）
 node scripts/check-ui.mjs            # 前端模块加载与渲染函数
 node scripts/check-dpapi.mjs         # 凭据仓库端到端：DPAPI 加密 / 跨进程冷启动解密 / 空值边界
 node scripts/check-net.mjs           # 网络自检判据
-node scripts/check-scan.mjs          # 扫描器只读性
 node scripts/check-dialog.mjs        # 原生对话框桥
 ```
 
 > `check-clone-e2e.mjs` 需要可访问 `github.com`，无网络时设 `GM_TEST_NET=1` 才执行真实克隆。
+> `check-scan.mjs` 是**探索性脚本**而非自包含测试：需先自己起一个 `node server/index.js --port 4630`，并把夹具目录与真实仓库路径作为参数传入。
 
 ---
 

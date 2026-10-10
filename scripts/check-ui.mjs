@@ -218,6 +218,49 @@ console.log('\n[7] AI 协作痕迹：徽章与面板');
   check('样本为空时给出提示', views.renderAiPanel({ sampled: 0 }).includes('样本不足'));
 }
 
+console.log('\n[8] 提交入口：概览卡片 / 顶栏 / 头像代理');
+{
+  // 用户明确反馈「找不到哪里可以提交文件」，所以入口的**可见性**本身就是被测对象
+  const card = views.renderPublishCard({ status: { dirtyCount: 3 }, head: 'main' });
+  check('★ 概览页有「提交并推送」入口', card.includes('data-action="publish-wizard"'), card.slice(0, 60));
+  check('  └ 显示未提交改动数', card.includes('<b>3</b>'), '');
+  check('  └ 显示当前分支', card.includes('main'));
+  check('  └ 指明了单文件提交入口在哪', card.includes('上传本地文件') && card.includes('GitHub'));
+  dirty(card, '发布卡片');
+
+  const clean = views.renderPublishCard({ status: { dirtyCount: 0 }, head: 'dev' });
+  check('干净工作区提示可直接推送', clean.includes('工作区是干净的'));
+  dirty(clean, '发布卡片（干净）');
+  dirty(views.renderPublishCard({}), '发布卡片（字段缺失）');
+  dirty(views.renderPublishCard(), '发布卡片（无参）');
+
+  // 头像：外域地址会被 CSP(img-src 'self') 拦掉，必须能走同源代理
+  const withProxy = views.renderGithub({
+    auth: { connected: true, method: 'oauth', viewer: { login: 'octocat', name: 'The Octocat', avatar: 'https://avatars.githubusercontent.com/u/1', proxyAvatar: '/api/gh/avatar?login=octocat&t=x', scopes: ['repo'] } },
+    net: { verdict: 'ok', targets: [] },
+    repos: [],
+    filter: {},
+  });
+  check('★ 头像使用同源代理地址', withProxy.includes('src="/api/gh/avatar?'), '');
+  check('  └ 不再直连外域头像', !withProxy.includes('src="https://avatars.githubusercontent.com'));
+  check('  └ 带字形兜底骨架', withProxy.includes('gh-avatar-fallback'));
+  check('  └ 兜底默认隐藏（靠 [hidden] 规则生效）', /gh-avatar-fallback" hidden/.test(withProxy));
+  check('  └ 没有内联 onerror（CSP 会拦）', !/onerror=/.test(withProxy));
+
+  const noAvatar = views.renderGithub({
+    auth: { connected: true, method: 'oauth', viewer: { login: 'x', scopes: [] } },
+    net: { verdict: 'ok', targets: [] },
+    repos: [],
+    filter: {},
+  });
+  check('没有头像地址时直接给字形', noAvatar.includes('gh-avatar-fallback') && !noAvatar.includes('<img'));
+  dirty(withProxy, 'GitHub 已连接（带头像）');
+
+  check('导出 openPublishWizard', typeof palette.openPublishWizard === 'function');
+  check('导出 openGithubUpload', typeof palette.openGithubUpload === 'function');
+  check('导出 openGithubEditorByPath', typeof palette.openGithubEditorByPath === 'function');
+}
+
 console.log('');
 console.log('='.repeat(46));
 console.log(`通过 ${pass} 项，失败 ${fail} 项`);
