@@ -63,6 +63,140 @@ export function renderEmpty(state) {
   </div>`;
 }
 
+/* ---------------- AI 协作痕迹 ---------------- */
+
+export const AI_LEVEL_LABEL = {
+  high: '高置信',
+  likely: '疑似',
+  weak: '弱痕迹',
+  none: '未发现',
+};
+
+/** 服务端没给免责声明时的兜底文案 —— 措辞必须保守，不能把推断说成事实 */
+export const DEFAULT_AI_DISCLAIMER =
+  '这是基于本地 git 元数据的痕迹推断，不是事实判定。没检出痕迹不代表没有 AI 参与。';
+
+const AI_LEVEL_NOTE = {
+  high: '发现 AI 署名或生成标记等显式证据。',
+  likely: '提交形态与节奏符合 AI 习惯，但**没有显式证据** —— 严谨的人类开发者也可能写成这样，请结合依据自行判断。',
+  weak: '只命中少量启发式信号，不足以定性，仅作提示。',
+  none: '没有检出可识别的痕迹。这不代表没有 AI 参与。',
+};
+
+const AI_BUCKETS = [
+  ['high', '高置信', '#0A84FF'],
+  ['likely', '疑似', 'rgba(10,132,255,.5)'],
+  ['weak', '弱痕迹', 'rgba(142,142,147,.45)'],
+  ['none', '未发现', 'rgba(142,142,147,.16)'],
+];
+
+/** 提交列表里的 AI 徽章 —— 区分「高置信」与「疑似」，不搞一刀切 */
+export function aiBadge(c) {
+  const lv = c?.aiLevel || (c?.isAI ? 'likely' : 'none');
+  if (lv === 'high') return '<span class="badge b-blue" title="高置信：存在 AI 署名／生成标记等显式证据">AI</span>';
+  if (lv === 'likely') return '<span class="badge b-blue-soft" title="疑似：提交形态与节奏符合 AI 习惯（无显式证据）">AI?</span>';
+  if (lv === 'weak') return '<span class="badge b-dim" title="弱痕迹：只命中少量启发式信号">AI?</span>';
+  return '';
+}
+
+/**
+ * AI 协作痕迹面板：把「靠什么判的」摊开给用户，而不是甩一个百分比。
+ * 用户曾反馈「全是我用 AI 写的却报 0%」—— 只给数字而不给依据，既不准也无法验证。
+ */
+export function renderAiPanel(ai) {
+  if (!ai || !ai.sampled) {
+    return `<div class="card" style="margin-top:12px">
+      <p class="section-title" style="margin:0 0 6px">AI 协作痕迹</p>
+      <p class="tiny muted" style="margin:0">样本不足，暂不判断。</p>
+    </div>`;
+  }
+
+  const level = ai.level || 'none';
+  const sampled = Number(ai.sampled) || 0;
+  const flagged = Number(ai.flagged ?? 0) || 0;
+  const untraced = Number.isFinite(Number(ai.untraced)) ? Number(ai.untraced) : Math.max(0, sampled - flagged);
+  const counts = { high: 0, likely: 0, weak: 0, none: 0, ...(ai.counts || {}) };
+
+  const bar = AI_BUCKETS.filter(([k]) => (counts[k] || 0) > 0)
+    .map(([k, , color]) => `<span style="flex:${counts[k]};background:${color}" title="${esc(AI_LEVEL_LABEL[k])} ${counts[k]} 次"></span>`)
+    .join('');
+
+  const legend = AI_BUCKETS.filter(([k]) => (counts[k] || 0) > 0)
+    .map(
+      ([k, label, color]) =>
+        `<span class="ai-leg"><i style="background:${color}"></i>${esc(label)} <b>${counts[k]}</b></span>`,
+    )
+    .join('');
+
+  const signals = (ai.signals || []).length
+    ? ai.signals
+        .map(
+          (s) => `<div class="ai-sig">
+            <span class="ai-sig-w">+${s.weight}</span>
+            <span class="ai-sig-l">${esc(s.label)}</span>
+            <span class="tiny muted">命中 ${s.hits} 次</span>
+          </div>`,
+        )
+        .join('')
+    : '<p class="tiny muted" style="margin:6px 0 0">没有任何信号命中。</p>';
+
+  const tools = (ai.agentFiles || []).length
+    ? ai.agentFiles
+        .map((a) => `<span class="badge" title="${esc(a.files.join('\n'))}">${esc(a.tool)}</span>`)
+        .join(' ')
+    : '';
+
+  const evid = tools
+    ? `<div class="note" style="margin-top:12px">
+         <div>本仓库检出 <b>AI 工具痕迹文件</b>：${tools}</div>
+         <div class="tiny muted" style="margin-top:4px">
+           说明这个项目上确实有 AI 代理在工作过。<span class="mono">.gitignore</span> 里未跟踪的痕迹文件不会被计入。
+         </div>
+       </div>`
+    : '';
+
+  const under = ai.likelyUnderestimated
+    ? `<div class="note note-warn" style="margin-top:10px">
+         有 <b>${untraced}</b> 个提交没留下任何可检出的痕迹，实际 AI 参与度<b>很可能高于</b>上面的估算。
+         「未检出」只是说提交信息里没有线索，不等于没有 AI 参与。
+       </div>`
+    : '';
+
+  return `<div class="card" style="margin-top:12px">
+    <div class="spread" style="margin-bottom:4px">
+      <p class="section-title" style="margin:0">AI 协作痕迹</p>
+      <span class="badge b-blue-soft">推断 · 非事实判定</span>
+    </div>
+
+    <div class="row" style="gap:14px;align-items:baseline;margin-top:6px">
+      <span style="font-size:26px;font-weight:600;letter-spacing:-.02em">${pct(Number(ai.ratio) || 0)}</span>
+      <span class="tiny muted">明确留下痕迹的提交占比（疑似及以上）</span>
+      <span style="flex:1"></span>
+      <span class="badge ${level === 'high' ? 'b-blue' : 'b-dim'}">整体：${esc(AI_LEVEL_LABEL[level] || level)}</span>
+    </div>
+
+    <p class="tiny muted" style="margin:6px 0 12px">
+      样本：最近 <b>${sampled}</b> 次提交 · 有痕迹 <b>${flagged}</b> 次
+    </p>
+
+    <div class="ai-bar">${bar}</div>
+    <div class="ai-legs">${legend}</div>
+
+    <p class="tiny" style="margin:12px 0 4px;color:var(--t3)">判定依据（按命中次数排序）</p>
+    <div class="ai-sigs">${signals}</div>
+
+    ${evid}
+    ${under}
+
+    <p class="tiny muted" style="margin:12px 0 0;line-height:1.6">
+      ${esc(ai.disclaimer || DEFAULT_AI_DISCLAIMER)}
+      <br>检测只读 git 元数据（提交信息、作者、时间、改动行数）与<span class="mono">文件路径名</span>，
+      <b>不读取文件内容、不联网、不上传任何数据</b>。
+    </p>
+    <p class="tiny muted" style="margin:6px 0 0">${esc(AI_LEVEL_NOTE[level] || '')}</p>
+  </div>`;
+}
+
 /* ---------------- 概览 ---------------- */
 
 export function renderOverview({ overview: o, health: h, activity: a, commits: cm }) {
@@ -72,7 +206,7 @@ export function renderOverview({ overview: o, health: h, activity: a, commits: c
     metricCard('未提交改动', o.status.dirtyCount, o.status.dirtyCount ? '待处理' : ''),
     metricCard('未合并分支', h.metrics.unmergedBranches),
     metricCard('stash 堆积', o.stashCount),
-    metricCard('AI 参与度', pct(o.ai.ratio), '估算'),
+    metricCard('AI 协作痕迹', o.ai.sampled ? `${o.ai.flagged ?? 0}/${o.ai.sampled}` : '—', '有痕迹的提交'),
   ].join('');
 
   const issues = h.issues.length
@@ -95,7 +229,7 @@ export function renderOverview({ overview: o, health: h, activity: a, commits: c
       (c) => `<div class="list-row">
         <span class="mono tiny muted" style="flex:0 0 58px">${esc(c.short)}</span>
         <span style="min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(c.subject)}">${esc(c.subject || '(无提交信息)')}</span>
-        ${c.isAI ? '<span class="badge b-blue">AI</span>' : ''}
+        ${aiBadge(c)}
         <span class="tiny muted" style="flex:0 0 62px;text-align:right">${esc(relTime(c.date))}</span>
       </div>`,
     )
@@ -116,6 +250,7 @@ export function renderOverview({ overview: o, health: h, activity: a, commits: c
       </div>
       <div class="grid g-3">${metrics}</div>
     </div>
+    ${renderAiPanel(o.ai)}
   </div>
 
   <div class="section">
@@ -205,14 +340,19 @@ export function renderCommits({ commits: cm }) {
           <div class="tiny muted">${esc(c.author)} · ${esc(fmtDay(c.date))}</div>
         </div>
         ${c.refs.map((r) => `<span class="badge b-plain">${esc(r)}</span>`).join('')}
-        ${c.isAI ? '<span class="badge b-blue">AI</span>' : ''}
+        ${aiBadge(c)}
       </div>`,
     )
     .join('');
   return `<div class="section">
     <p class="section-title">最近 ${cm.length} 次提交</p>
     <div class="card" style="padding:6px 16px">${rows || '<p class="muted tiny">暂无提交</p>'}</div>
-    <p class="tiny muted" style="margin-top:10px">带 <span class="badge b-blue">AI</span> 标记的提交，是在提交信息或署名中发现 AI 痕迹（启发性估算）。</p>
+    <p class="tiny muted" style="margin-top:10px">
+      徽章含义：<span class="badge b-blue">AI</span> 高置信（有 AI 署名／生成标记等显式证据）·
+      <span class="badge b-blue-soft">AI?</span> 疑似（提交形态与节奏符合 AI 习惯，但无显式证据）·
+      <span class="badge b-dim">AI?</span> 弱痕迹。
+      全部为本地启发式推断，<b>未标记不等于没有 AI 参与</b>；依据可在「概览」页的 AI 协作痕迹卡片中查看。
+    </p>
   </div>`;
 }
 

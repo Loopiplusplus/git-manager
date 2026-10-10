@@ -1,6 +1,15 @@
 import path from 'node:path';
 import { git, gitOk } from './git.js';
-import { daysSince, humanSize, lines, looksLikeAI, clamp } from './util.js';
+import { daysSince, humanSize, lines, clamp } from './util.js';
+import {
+  LOG_FORMAT,
+  parseLogWithShortstat,
+  buildContext,
+  analyzeCommit,
+  detectAgentFiles,
+  summarize,
+  emptySummary,
+} from './ai-signals.js';
 
 const SEP = '|~|';
 const US = '\x1f';
@@ -130,24 +139,32 @@ export async function overview(repo) {
   };
 }
 
-/** AI 参与度（启发式，UI 需标注“估算”） */
-async function aiStats(repoPath, sample = 300) {
-  const r = await gitOk(repoPath, ['log', `-n`, String(sample), `--format=%H${US}%an${US}%s${US}%b${RS}`], { timeout: 30000 });
-  if (!r.ok) return { sampled: 0, aiCommits: 0, ratio: 0, isEstimate: true };
-  const records = r.out.split(RS).map((s) => s.replace(/^\n/, '')).filter((s) => s.trim());
-  let aiCommits = 0;
-  for (const rec of records) {
-    const [hash, author, subject, body] = rec.split(US);
-    if (!hash) continue;
-    if (looksLikeAI({ subject: subject || '', body: body || '', author: author || '' })) aiCommits += 1;
-  }
-  const sampled = records.length;
-  return {
-    sampled,
-    aiCommits,
-    ratio: sampled ? Number((aiCommits / sampled).toFixed(4)) : 0,
-    isEstimate: true,
-  };
+/**
+ * AI 协作痕迹（启发式，UI 必须标注为「推断」并展示每条依据）。
+ *
+ * 隐私：只读 git 元数据（提交信息 / 作者 / 时间 / 改动行数）与**文件路径名**，
+ * 不读取任何文件内容，不联网，不上传任何数据。
+ */
+async function aiStats(repoPath, sample = 200) {
+  const [records, filesRes] = await Promise.all([
+    loadAiRecords(repoPath, sample),
+    gitOk(repoPath, ['ls-files'], { timeout: 30000 }),
+  ]);
+  if (!records.length) return emptySummary();
+
+  const ctx = buildContext(records);
+  const analyzed = records.map((r) => analyzeCommit(r, ctx));
+  const agentFiles = filesRes.ok ? detectAgentFiles(lines(filesRes.out)) : [];
+  return summarize(analyzed, agentFiles);
+}
+
+/** 取提交记录：优先带 --shortstat（可算改动量信号）；失败则退回纯元数据，让其余信号仍可用 */
+async function loadAiRecords(repoPath, sample) {
+  const base = ['log', '-n', String(sample), `--format=${LOG_FORMAT}`];
+  const withStats = await gitOk(repoPath, [...base, '--shortstat'], { timeout: 30000 });
+  if (withStats.ok) return parseLogWithShortstat(withStats.out);
+  const plain = await gitOk(repoPath, base, { timeout: 30000 });
+  return plain.ok ? parseLogWithShortstat(plain.out) : [];
 }
 
 /** 分支列表（含风险信息） */
@@ -209,28 +226,50 @@ export async function branches(repo) {
   };
 }
 
-/** 最近提交 */
+/** 最近提交（附带 AI 痕迹等级，供列表徽章使用） */
 export async function commits(repo, limit = 40) {
   const n = clamp(Number(limit) || 40, 1, 300);
-  const fmt = `%H${US}%h${US}%an${US}%aI${US}%s${US}%D${US}%b${RS}`;
+  const fmt = `%H${US}%h${US}%an${US}%cn${US}%aI${US}%at${US}%s${US}%D${US}%b${RS}`;
   const r = await gitOk(repo.path, ['log', '-n', String(n), `--format=${fmt}`]);
   if (!r.ok) return [];
-  return r.out
+
+  const rows = r.out
     .split(RS)
     .map((s) => s.replace(/^\n/, ''))
     .filter((s) => s.trim())
     .map((rec) => {
-      const [hash, short, author, date, subject, refs, body] = rec.split(US);
+      const p = rec.split(US);
+      while (p.length < 9) p.push('');
       return {
-        hash,
-        short,
-        author,
-        date,
-        subject: subject || '',
-        refs: refs ? refs.split(',').map((x) => x.trim()).filter(Boolean) : [],
-        isAI: looksLikeAI({ subject: subject || '', body: body || '', author: author || '' }),
+        hash: p[0],
+        short: p[1],
+        author: p[2],
+        committer: p[3],
+        date: p[4],
+        at: p[5],
+        subject: p[6] || '',
+        refs: p[7] ? p[7].split(',').map((x) => x.trim()).filter(Boolean) : [],
+        body: p.slice(8).join(US),
       };
     });
+
+  // 以同一批样本建立基线，保证列表徽章与概览用的是同一套判据
+  const ctx = buildContext(rows);
+  return rows.map((row) => {
+    const a = analyzeCommit(row, ctx);
+    return {
+      hash: row.hash,
+      short: row.short,
+      author: row.author,
+      date: row.date,
+      subject: row.subject,
+      refs: row.refs,
+      isAI: a.level === 'high' || a.level === 'likely',
+      aiLevel: a.level,
+      aiScore: a.score,
+      aiSignals: a.signals.map((s) => s.id),
+    };
+  });
 }
 
 /** 提交活动热力图（近 N 周） */

@@ -134,29 +134,88 @@ console.log('\n[6] 用真实数据回归本地仓库各视图');
   if (!token) {
     console.log('  · 跳过：本地服务未运行或拿不到令牌');
   } else {
-    const H = { 'x-gm-token': token };
-    const repos = await fetch(`http://127.0.0.1:${PORT}/api/repos`, { headers: H }).then((r) => r.json());
-    const mine = repos.repos.find((r) => r.exists);
-    if (!mine) {
-      console.log('  · 跳过：没有已接入的本地仓库');
-    } else {
-      const g = (p) => fetch(`http://127.0.0.1:${PORT}/api/repos/${mine.id}${p}`, { headers: H }).then((r) => r.json());
-      const [o, h, a, cm, br, lg] = await Promise.all([
-        g('/overview'), g('/health'), g('/activity?weeks=12'), g('/commits?limit=20'), g('/branches'), g('/log'),
-      ]);
-      const v1 = views.renderOverview({ overview: o, health: h, activity: a, commits: cm.commits });
-      const v2 = views.renderBranches({ branches: br });
-      const v3 = views.renderCommits({ commits: cm.commits });
-      const v4 = views.renderLog({ logs: lg.logs });
-      const v5 = views.renderEmpty({ repos: repos.repos });
-      for (const [n, html] of [['概览', v1], ['分支', v2], ['提交', v3], ['日志', v4], ['空状态', v5]]) {
-        check(`${n} 视图渲染成功`, typeof html === 'string' && html.length > 100, String(html?.length));
-        dirty(html, `${n}视图`);
+    // 服务重启的瞬间请求可能被拒（ECONNRESET / 非 JSON 响应）。
+    // 整组包在 try/catch 里：这种情况只跳过本组，绝不中断后续所有断言。
+    try {
+      const H = { 'x-gm-token': token };
+      const repos = await fetch(`http://127.0.0.1:${PORT}/api/repos`, { headers: H }).then((r) => r.json());
+      const mine = repos.repos.find((r) => r.exists);
+      if (!mine) {
+        console.log('  · 跳过：没有已接入的本地仓库');
+      } else {
+        const g = (p) => fetch(`http://127.0.0.1:${PORT}/api/repos/${mine.id}${p}`, { headers: H }).then((r) => r.json());
+        const [o, h, a, cm, br, lg] = await Promise.all([
+          g('/overview'), g('/health'), g('/activity?weeks=12'), g('/commits?limit=20'), g('/branches'), g('/log'),
+        ]);
+        const v1 = views.renderOverview({ overview: o, health: h, activity: a, commits: cm.commits });
+        const v2 = views.renderBranches({ branches: br });
+        const v3 = views.renderCommits({ commits: cm.commits });
+        const v4 = views.renderLog({ logs: lg.logs });
+        const v5 = views.renderEmpty({ repos: repos.repos });
+        for (const [n, html] of [['概览', v1], ['分支', v2], ['提交', v3], ['日志', v4], ['空状态', v5]]) {
+          check(`${n} 视图渲染成功`, typeof html === 'string' && html.length > 100, String(html?.length));
+          dirty(html, `${n}视图`);
+        }
+        check('概览含健康度评分', v1.includes(String(h.score)));
+        check('分支视图含分支名', v2.includes('main'));
       }
-      check('概览含健康度评分', v1.includes(String(h.score)));
-      check('分支视图含分支名', v2.includes('main'));
+    } catch (e) {
+      console.log(`  · 跳过：服务暂不可达（${e.message}）`);
     }
   }
+}
+
+console.log('\n[7] AI 协作痕迹：徽章与面板');
+{
+  // 曾经整个功能是摆设：只扫关键词，导致「全用 AI 写的仓库」报 0%。
+  // 现在必须做到：等级可区分、依据可见、口径诚实。
+  check('高置信徽章', views.aiBadge({ aiLevel: 'high' }).includes('>AI<'), views.aiBadge({ aiLevel: 'high' }));
+  check('疑似徽章与高置信可区分', views.aiBadge({ aiLevel: 'likely' }).includes('AI?') && views.aiBadge({ aiLevel: 'likely' }).includes('b-blue-soft'));
+  check('弱痕迹徽章更弱一档', views.aiBadge({ aiLevel: 'weak' }).includes('b-dim'));
+  check('未发现不给徽章', views.aiBadge({ aiLevel: 'none' }) === '');
+  check('兼容旧字段 isAI', views.aiBadge({ isAI: true }).includes('AI?'));
+
+  const partial = {
+    sampled: 7,
+    ratio: 0.7143,
+    flagged: 5,
+    untraced: 2,
+    level: 'likely',
+    counts: { high: 0, likely: 5, weak: 1, none: 1 },
+    signals: [
+      { id: 'burst', label: '与相邻提交间隔极短', weight: 12, hits: 7 },
+      { id: 'structured-body', label: '正文结构化成文', weight: 25, hits: 5 },
+    ],
+    agentFiles: [{ tool: 'WorkBuddy', files: ['.workbuddy/memory/2026-10-10.md'] }],
+    likelyUnderestimated: true,
+    disclaimer: '这是基于本地 git 元数据的痕迹推断，不是事实判定。',
+  };
+  const html = views.renderAiPanel(partial);
+  check('显示占比', html.includes('71%'), html.slice(0, 0));
+  check('显示样本与命中数', html.includes('<b>7</b>') && html.includes('<b>5</b>'));
+  check('★ 列出判定依据（信号 + 权重）', html.includes('与相邻提交间隔极短') && html.includes('+25'));
+  check('★ 列出 AI 工具痕迹文件证据', html.includes('WorkBuddy') && html.includes('.workbuddy/'));
+  check('★ 提示实际参与度可能更高', html.includes('很可能高于') && html.includes('没留下任何可检出'));
+  check('★ 带免责声明', html.includes('不是事实判定'));
+  check('★ 声明隐私边界', html.includes('不读取文件内容') && html.includes('不联网'));
+  check('标注为推断而非事实', html.includes('推断 · 非事实判定'));
+  check('等级说明里点明人类也可能如此', html.includes('严谨的人类开发者') || html.includes('人类开发者'));
+  dirty(html, 'AI 面板');
+
+  // 零痕迹时必须给出「不代表没有 AI」，而不是让 0% 自己说话
+  const zero = views.renderAiPanel({ sampled: 10, ratio: 0, flagged: 0, level: 'none', counts: { high: 0, likely: 0, weak: 0, none: 10 }, signals: [], agentFiles: [] });
+  check('★ 零痕迹时明确写「不代表没有 AI 参与」', zero.includes('不代表没有 AI 参与'), zero.slice(0, 0));
+  dirty(zero, 'AI 面板（零痕迹）');
+
+  // 高置信：有显式证据
+  const high = views.renderAiPanel({ sampled: 3, ratio: 0.33, flagged: 1, level: 'high', counts: { high: 1, likely: 0, weak: 0, none: 2 }, signals: [{ id: 'coauthor', label: '提交信息含 AI 协作署名', weight: 100, hits: 1 }], agentFiles: [] });
+  check('高置信时展示显式证据', high.includes('AI 协作署名') && high.includes('+100'));
+  check('高置信时说明依据是显式证据', high.includes('AI 署名') || high.includes('显式证据'));
+
+  // 字段缺失不能让界面漏出 undefined
+  dirty(views.renderAiPanel({ sampled: 3, ratio: 0, level: 'none' }), 'AI 面板（字段缺失）');
+  dirty(views.renderAiPanel({}), 'AI 面板（空对象）');
+  check('样本为空时给出提示', views.renderAiPanel({ sampled: 0 }).includes('样本不足'));
 }
 
 console.log('');
