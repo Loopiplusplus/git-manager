@@ -18,6 +18,10 @@
   "engines": {
     "node": ">=18"
   },
+  "_notes": {
+    "electronLanguages": "裁掉多余语言可省约 13MB（locales 默认 55 种共 49MB）。默认**刻意不启用**：该步骤会一次性删除 50+ 个文件，在有批量删除保护的环境里会直接让打包失败。要启用就在 build 里加 \"electronLanguages\": [\"zh-CN\", \"en-US\"]。",
+    "_whyNotInBuild": "electron-builder 会严格校验 build 段的 schema，任何未知键都直接报错 —— 所以这类备注只能放在 build 之外（放根级）。"
+  },
   "build": {
     "appId": "com.gitmanager.desktop",
     "productName": "GitManager",
@@ -34,7 +38,6 @@
       "package.json",
       "!**/*.map"
     ],
-    "_note_electronLanguages": "裁掉多余语言可省约 13MB（locales 默认 55 种共 49MB）。这里**刻意不启用**：该步骤会一次性删除 50+ 个文件，在有批量删除保护的环境里会直接让打包失败。要启用就自己加 \"electronLanguages\": [\"zh-CN\",\"en-US\"]。",
     "win": {
       "target": [
         {
